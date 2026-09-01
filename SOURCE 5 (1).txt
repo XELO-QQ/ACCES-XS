@@ -3004,14 +3004,30 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 													if cached then
 														value = cached
 														should_decompile = nil
-															value = ldecompile(instance)
-															if SaveBytecode then
-																local output = SaveBytecode(instance)
-																if output then
-																	value = output .. value
-																end
-															end
+													end
+												end
+												if should_decompile then
+													if DecompileJobless then
+														value = "-- Not found in LinkedSource ScriptCache"
+														should_decompile = nil
+													end
+
+													LinkedSource_type = string.find(LinkedSource, "%a") and "hash"
+														or "id"
+
+													local asset = LinkedSource_type .. "=" .. LinkedSource
+
+													local ok, source = pcall(function()
+														-- Credits @halffalse
+														return game:HttpGet(
+															"https://assetdelivery.roproxy.com/v1/asset/?" .. asset
 														)
+													end)
+
+													if ok and filterLinkedSource(source) then
+														if ScriptCache then
+															ldeccache[LinkedSource] = source
+														end
 
 														value = source
 
@@ -3028,11 +3044,22 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 										end
 
 										if should_decompile then
+											local isLocalScript = instance:IsA("LocalScript")
+											if
+												isLocalScript and instance.RunContext == Enum.RunContext.Server
+												or not isLocalScript
+												and instance:IsA("Script")
+												and instance.RunContext ~= Enum.RunContext.Client
+											then
+												value = "" -- TODO: Could be not just server scripts in the future
+											else 
 												value = ldecompile(instance)
 												if SaveBytecode then
 													local output = SaveBytecode(instance)
 													if output then
 														value = output .. value
+													end
+												end
 											end
 										end
 
