@@ -3198,6 +3198,28 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			table.insert(ToSaveList, instance)
 		end
 
+		local function ensureScript(parent, name, source, scriptType)
+			scriptType = scriptType or "Script"
+			local existing = parent and parent:FindFirstChild(name)
+			if existing and existing.ClassName == scriptType then
+				existing.Source = source
+				addToSaveListIfNeeded(existing)
+				return existing
+			end
+			if existing then
+				existing:Destroy()
+			end
+			local script = Instance.new(scriptType)
+			script.Name = name
+			script.Source = source
+			if script:IsA("Script") then
+				script.RunContext = Enum.RunContext.Server
+			end
+			script.Parent = parent
+			addToSaveListIfNeeded(script)
+			return script
+		end
+
 		local function ensureModule(parent, name, source)
 			local existing = parent and parent:FindFirstChild(name)
 			if existing and existing:IsA("ModuleScript") then
@@ -3704,11 +3726,12 @@ return PetService
 				table.insert(registry[category], item)
 			end
 
-			local function scriptTemplate(name, source)
+			local function scriptTemplate(name, source, scriptType)
 				return {
 					name = name,
 					moduleName = name,
 					source = source,
+					scriptType = scriptType or "Script",
 				}
 			end
 
@@ -3735,7 +3758,7 @@ function CombatController:unregisterPlayer(player)
 end
 
 return CombatController
-]]))
+]], "Script"))
 
 			add("combat", scriptTemplate("DamageService", [[
 local DamageService = {}
@@ -3749,7 +3772,7 @@ function DamageService:applyDamage(target, amount)
 end
 
 return DamageService
-]]))
+]], "Script"))
 
 			add("combat", scriptTemplate("HitboxService", [[
 local HitboxService = {}
@@ -3762,7 +3785,7 @@ function HitboxService:check(target)
 end
 
 return HitboxService
-]]))
+]], "Script"))
 
 			add("economy", scriptTemplate("CurrencyService", [[
 local CurrencyService = {}
@@ -4406,7 +4429,11 @@ return ZoneService
 						if item and item.moduleName then
 							local target = serverRoot:FindFirstChild(item.moduleName)
 							if not target then
-								target = ensureModule(serverRoot, item.moduleName, item.source)
+								if item.scriptType == "ModuleScript" then
+									target = ensureModule(serverRoot, item.moduleName, item.source)
+								else
+									target = ensureScript(serverRoot, item.moduleName, item.source, item.scriptType or "Script")
+								end
 							end
 							addToSaveListIfNeeded(target)
 							table.insert(applied, item.moduleName)
