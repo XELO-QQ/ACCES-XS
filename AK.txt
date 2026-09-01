@@ -3154,28 +3154,19 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			or IsolatePlayers
 			or NilInstances and global_container.getnilinstances -- ! Make sure this accurately reflects everything below
 
-		-- FAKE INSTANCES: inject realistic-looking scripts and objects into save output across ALL services
+		-- Real generation is analysis-first and template-driven.
+		-- Fake placeholder-script injection is intentionally disabled to avoid fabricating logic
+		-- that does not exist in the live DataModel.
 		local _fakeAll = {}
 		local function _addFake(className, scriptName, scriptSource, parent)
-			pcall(function()
-				local s = Instance.new(className)
-				s.Name = scriptName
-				s.Archivable = true
-				if scriptSource then s.Source = scriptSource end
-				s.Parent = parent
-				if scriptSource then
-					InstancesOverrides[s] = {__SaveSpecific = true, Properties = {Name = scriptName, Source = scriptSource}}
-				end
-				table.insert(_fakeAll, s)
-			end)
+			return nil
 		end
 
 		----------------------------------------------------------------
 		-- SERVERSCRIPTSERVICE (Scripts & ModuleScripts)
 		----------------------------------------------------------------
 		local _SSS = service.ServerScriptService
-
-		_addFakeScript = function(cls, name, src) _addFake(cls, name, src, _SSS) end
+		_addFakeScript = function() return nil end
 
 		_addFakeScript("Script", "GameManager", [==[-- GameManager
 local Players = game:GetService("Players")
