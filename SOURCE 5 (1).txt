@@ -3186,16 +3186,30 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			return folder
 		end
 
+		local function addToSaveListIfNeeded(instance)
+			if not instance or not ToSaveList then
+				return
+			end
+			for _, saved in ipairs(ToSaveList) do
+				if saved == instance then
+					return
+				end
+			end
+			table.insert(ToSaveList, instance)
+		end
+
 		local function ensureModule(parent, name, source)
 			local existing = parent and parent:FindFirstChild(name)
 			if existing and existing:IsA("ModuleScript") then
 				existing.Source = source
+				addToSaveListIfNeeded(existing)
 				return existing
 			end
 			local module = Instance.new("ModuleScript")
 			module.Name = name
 			module.Source = source
 			module.Parent = parent
+			addToSaveListIfNeeded(module)
 			return module
 		end
 		
@@ -4310,9 +4324,11 @@ return ZoneService
 			local serverRoot = root:FindFirstChild("ServerScriptService") or Instance.new("Folder")
 			serverRoot.Name = "ServerScriptService"
 			serverRoot.Parent = root
+			addToSaveListIfNeeded(serverRoot)
 			local repRoot = root:FindFirstChild("ReplicatedStorage") or Instance.new("Folder")
 			repRoot.Name = "ReplicatedStorage"
 			repRoot.Parent = root
+			addToSaveListIfNeeded(repRoot)
 
 			local library = buildTemplateLibrary()
 			local templates = {}
@@ -4390,8 +4406,9 @@ return ZoneService
 						if item and item.moduleName then
 							local target = serverRoot:FindFirstChild(item.moduleName)
 							if not target then
-								ensureModule(serverRoot, item.moduleName, item.source)
+								target = ensureModule(serverRoot, item.moduleName, item.source)
 							end
+							addToSaveListIfNeeded(target)
 							table.insert(applied, item.moduleName)
 						end
 					end
