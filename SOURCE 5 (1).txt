@@ -1897,8 +1897,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local currentstr, currentsize, totalsize, chunks = "", 0, 0, table.create(1)
 	local savebuffer, savebuffer_size = {}, 1
 	local header =
-	'<!-- Saved by XELO STEALER v6.2 | Made by Xelo -->\n' ..
-	'<!-- Discord: ' .. (DiscordLink or "https://discord.gg/hermeznxelo") .. ' -->\n' ..
+	'<!-- Exported by script -->\n' ..
 	'<roblox version="4">'
 	local StatusText
 
@@ -3044,22 +3043,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 										end
 
 										if should_decompile then
-											local isLocalScript = instance:IsA("LocalScript")
-											if
-												isLocalScript and instance.RunContext == Enum.RunContext.Server
-												or not isLocalScript
-												and instance:IsA("Script")
-												and instance.RunContext ~= Enum.RunContext.Client
-											then
-												value = "-- [PURCHASE XELO EXECUTOR ] YOU NEED TO PURCHASE XELO EXECUTOR TO COPY SERVER SCRIPTS" -- TODO: Could be not just server scripts in the future
-											else 
-												value = ldecompile(instance)
-												if SaveBytecode then
-													local output = SaveBytecode(instance)
-													if output then
-														value = output .. value
-													end
-												end
+													value = ldecompile(instance)
+													if SaveBytecode then
+														local output = SaveBytecode(instance)
+														if output then
+															value = output .. value
 											end
 										end
 
