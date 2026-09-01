@@ -3222,30 +3222,110 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				vehicle = false,
 				pet = false,
 				checkpoint = false,
+				network = false,
+				collectible = false,
 			}
+
+			local function mark(key)
+				flags[key] = true
+			end
 
 			local function walk(instance)
 				if not instance then return end
+
 				local name = lowerString(instance.Name)
-				if name:find("weapon") or instance:IsA("Tool") then flags.weapon = true end
-				if name:find("damage") or instance:GetAttribute("Damage") ~= nil then flags.damage = true end
-				if name:find("coin") or name:find("currency") or name:find("gem") then flags.currency = true end
-				if name:find("leaderstats") then flags.leaderstats = true end
-				if name:find("button") then flags.button = true end
-				if name:find("ui") or name:find("menu") or name:find("hud") or name:find("screen") then flags.ui = true end
-				if name:find("quest") then flags.quest = true end
-				if name:find("npc") or name:find("enemy") or name:find("bot") then flags.npc = true flags.ai = true end
-				if name:find("round") or name:find("match") then flags.round = true flags.matchmaking = true end
-				if name:find("weather") or name:find("rain") or name:find("snow") then flags.weather = true end
-				if name:find("camera") then flags.camera = true end
-				if name:find("admin") then flags.admin = true end
-				if name:find("teleport") or name:find("portal") then flags.teleport = true end
-				if name:find("save") or name:find("load") then flags.saving = true end
-				if name:find("shop") or name:find("store") then flags.marketplace = true end
-				if name:find("vehicle") or name:find("car") or name:find("bike") then flags.vehicle = true end
-				if name:find("pet") then flags.pet = true end
-				if name:find("checkpoint") then flags.checkpoint = true end
-				if instance:IsA("Humanoid") then flags.combat = true end
+				local className = lowerString(instance.ClassName)
+				local attributeNames = ""
+
+				if instance then
+					for key, _ in pairs(instance:GetAttributes()) do
+						attributeNames ..= lowerString(key) .. " "
+					end
+				end
+
+				if instance:IsA("Humanoid") or name:find("humanoid") then
+					mark("combat")
+				end
+
+				if instance:IsA("Tool") or name:find("weapon") or name:find("gun") or name:find("sword") or name:find("blade") or name:find("axe") or name:find("bow") or name:find("hammer") then
+					mark("weapon")
+					mark("combat")
+				end
+
+				if instance:IsA("VehicleSeat") or name:find("vehicle") or name:find("car") or name:find("boat") or name:find("bike") or name:find("plane") or name:find("helicopter") then
+					mark("vehicle")
+				end
+
+				if name:find("damage") or name:find("attack") or name:find("hitbox") or name:find("combat") or attributeNames:find("damage") or attributeNames:find("attack") then
+					mark("damage")
+					mark("combat")
+				end
+
+				if name:find("coin") or name:find("currency") or name:find("gem") or name:find("cash") or name:find("gold") or name:find("leaderstats") or name:find("money") or name:find("bank") or name:find("shop") or name:find("store") then
+					mark("currency")
+					if name:find("leaderstats") then mark("leaderstats") end
+					if name:find("shop") or name:find("store") then mark("marketplace") end
+				end
+
+				if instance:IsA("TextButton") or instance:IsA("ImageButton") or instance:IsA("ScreenGui") or instance:IsA("SurfaceGui") or instance:IsA("BillboardGui") or name:find("ui") or name:find("hud") or name:find("menu") or name:find("screen") or name:find("inventory") or name:find("shop") or name:find("settings") then
+					mark("ui")
+					if instance:IsA("TextButton") or instance:IsA("ImageButton") then mark("button") end
+				end
+
+				if name:find("quest") or name:find("mission") or name:find("objective") or attributeNames:find("quest") then
+					mark("quest")
+				end
+
+				if name:find("npc") or name:find("enemy") or name:find("bot") or name:find("mob") or name:find("ai") then
+					mark("npc")
+					mark("ai")
+				end
+
+				if name:find("round") or name:find("match") or name:find("queue") or name:find("lobby") or instance:IsA("Team") then
+					mark("round")
+					mark("matchmaking")
+				end
+
+				if name:find("weather") or name:find("rain") or name:find("snow") or name:find("fog") or name:find("storm") or instance:IsA("Atmosphere") or instance:IsA("Clouds") or instance:IsA("Sky") then
+					mark("weather")
+				end
+
+				if name:find("camera") or name:find("view") then
+					mark("camera")
+				end
+
+				if name:find("admin") or name:find("mod") or name:find("moderator") then
+					mark("admin")
+				end
+
+				if name:find("teleport") or name:find("portal") or name:find("tp") or name:find("warp") then
+					mark("teleport")
+				end
+
+				if name:find("save") or name:find("load") or name:find("autosave") or name:find("playerdata") or name:find("datastore") or className:find("datastore") then
+					mark("saving")
+				end
+
+				if name:find("vehicle") or name:find("car") or name:find("boat") or name:find("bike") or name:find("driveseat") then
+					mark("vehicle")
+				end
+
+				if name:find("pet") or name:find("companion") or name:find("tame") then
+					mark("pet")
+				end
+
+				if name:find("checkpoint") or name:find("spawn") or name:find("respawn") then
+					mark("checkpoint")
+				end
+
+				if instance:IsA("RemoteEvent") or instance:IsA("RemoteFunction") or name:find("remote") or name:find("event") then
+					mark("network")
+				end
+
+				if name:find("pickup") or name:find("orb") or name:find("crate") or name:find("collectible") or name:find("drop") then
+					mark("collectible")
+				end
+
 				for _, child in ipairs(instance:GetChildren()) do
 					walk(child)
 				end
@@ -3278,11 +3358,15 @@ function CombatController.new()
 end
 
 function CombatController:registerPlayer(player)
-	self.active[player.UserId] = true
+	if player then
+		self.active[player.UserId] = true
+	end
 end
 
 function CombatController:removePlayer(player)
-	self.active[player.UserId] = nil
+	if player then
+		self.active[player.UserId] = nil
+	end
 end
 
 return CombatController
@@ -3292,8 +3376,11 @@ return CombatController
 local DamageService = {}
 
 function DamageService:applyDamage(target, amount)
-	if target and target:FindFirstChildOfClass("Humanoid") then
-		target:FindFirstChildOfClass("Humanoid").Health = math.max(0, target:FindFirstChildOfClass("Humanoid").Health - (amount or 0))
+	if target then
+		local humanoid = target:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.Health = math.max(0, humanoid.Health - (amount or 0))
+		end
 	end
 end
 
@@ -3345,7 +3432,7 @@ return EconomyConfig
 			return list
 		end
 
-		local function buildProgressionTemplates(serverRoot, repRoot)
+		local function buildProgressionTemplates(serverRoot)
 			local list = {}
 			local progressionFolder = ensureFolder(serverRoot, "Progression")
 			if progressionFolder then
@@ -3361,6 +3448,12 @@ function QuestService:grant(player, questId)
 	if not player then return end
 	self.active[player.UserId] = self.active[player.UserId] or {}
 	self.active[player.UserId][questId] = true
+end
+
+function QuestService:isComplete(player, questId)
+	if not player then return false end
+	local active = self.active[player.UserId]
+	return active and active[questId] == true or false
 end
 
 return QuestService
@@ -3408,7 +3501,7 @@ return PlayerSessionService
 			return list
 		end
 
-		local function buildEnvironmentTemplates(serverRoot, lightingRoot)
+		local function buildEnvironmentTemplates(serverRoot)
 			local list = {}
 			local weatherFolder = ensureFolder(serverRoot, "Environment")
 			if weatherFolder then
@@ -3444,9 +3537,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local NotificationService = {}
 
 function NotificationService:send(player, title, body)
-	local remote = ReplicatedStorage:FindFirstChild("Notification")
-	if remote and player then
-		remote:FireClient(player, title, body)
+	if player then
+		local remote = ReplicatedStorage:FindFirstChild("Notification")
+		if remote then
+			remote:FireClient(player, title, body)
+		end
 	end
 end
 
@@ -3506,7 +3601,7 @@ return AdminCommandService
 			return list
 		end
 
-		local function buildTeleportTemplates(serverRoot, repRoot)
+		local function buildTeleportTemplates(serverRoot)
 			local list = {}
 			local travelFolder = ensureFolder(serverRoot, "Travel")
 			if travelFolder then
@@ -3528,6 +3623,684 @@ return TeleportService
 			return list
 		end
 
+		local function buildVehicleTemplates(serverRoot)
+			local list = {}
+			local vehicleFolder = ensureFolder(serverRoot, "Vehicles")
+			if vehicleFolder then
+				table.insert(list, buildTemplate("VehicleService", "VehicleService", [[
+local VehicleService = {}
+VehicleService.__index = VehicleService
+
+function VehicleService.new()
+	return setmetatable({ active = {} }, VehicleService)
+end
+
+function VehicleService:enter(player, vehicleModel)
+	if player and vehicleModel then
+		self.active[player.UserId] = vehicleModel
+	end
+end
+
+function VehicleService:exit(player)
+	if player then
+		self.active[player.UserId] = nil
+	end
+end
+
+return VehicleService
+]]))
+			end
+			return list
+		end
+
+		local function buildPetTemplates(serverRoot)
+			local list = {}
+			local petFolder = ensureFolder(serverRoot, "Pets")
+			if petFolder then
+				table.insert(list, buildTemplate("PetService", "PetService", [[
+local PetService = {}
+PetService.__index = PetService
+
+function PetService.new()
+	return setmetatable({ equipped = {} }, PetService)
+end
+
+function PetService:equip(player, petName)
+	if player and petName then
+		self.equipped[player.UserId] = petName
+	end
+end
+
+function PetService:unequip(player)
+	if player then
+		self.equipped[player.UserId] = nil
+	end
+end
+
+return PetService
+]]))
+			end
+			return list
+		end
+
+		local function buildTemplateLibrary()
+			local registry = {}
+			local function add(category, item)
+				registry[category] = registry[category] or {}
+				table.insert(registry[category], item)
+			end
+
+			local function scriptTemplate(name, source)
+				return {
+					name = name,
+					moduleName = name,
+					source = source,
+				}
+			end
+
+			add("combat", scriptTemplate("CombatController", [[
+local CombatController = {}
+CombatController.__index = CombatController
+
+function CombatController.new()
+	local self = setmetatable({}, CombatController)
+	self.active = {}
+	return self
+end
+
+function CombatController:registerPlayer(player)
+	if player then
+		self.active[player.UserId] = true
+	end
+end
+
+function CombatController:unregisterPlayer(player)
+	if player then
+		self.active[player.UserId] = nil
+	end
+end
+
+return CombatController
+]]))
+
+			add("combat", scriptTemplate("DamageService", [[
+local DamageService = {}
+
+function DamageService:applyDamage(target, amount)
+	if not target then return end
+	local humanoid = target:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.Health = math.max(0, humanoid.Health - (amount or 0))
+	end
+end
+
+return DamageService
+]]))
+
+			add("combat", scriptTemplate("HitboxService", [[
+local HitboxService = {}
+
+function HitboxService:check(target)
+	if target and target:FindFirstChildOfClass("Humanoid") then
+		return true
+	end
+	return false
+end
+
+return HitboxService
+]]))
+
+			add("economy", scriptTemplate("CurrencyService", [[
+local CurrencyService = {}
+CurrencyService.__index = CurrencyService
+
+function CurrencyService.new()
+	return setmetatable({ ledger = {} }, CurrencyService)
+end
+
+function CurrencyService:get(player)
+	if not player then return 0 end
+	return self.ledger[player.UserId] or 0
+end
+
+function CurrencyService:add(player, amount)
+	if not player then return 0 end
+	self.ledger[player.UserId] = (self.ledger[player.UserId] or 0) + (amount or 0)
+	return self.ledger[player.UserId]
+end
+
+return CurrencyService
+]]))
+
+			add("economy", scriptTemplate("InventoryService", [[
+local InventoryService = {}
+InventoryService.__index = InventoryService
+
+function InventoryService.new()
+	return setmetatable({ items = {} }, InventoryService)
+end
+
+function InventoryService:add(player, itemId, quantity)
+	if not player then return end
+	self.items[player.UserId] = self.items[player.UserId] or {}
+	self.items[player.UserId][itemId] = (self.items[player.UserId][itemId] or 0) + (quantity or 1)
+end
+
+return InventoryService
+]]))
+
+			add("economy", scriptTemplate("ShopService", [[
+local ShopService = {}
+ShopService.__index = ShopService
+
+function ShopService.new()
+	return setmetatable({ catalog = {} }, ShopService)
+end
+
+function ShopService:register(itemId, data)
+	self.catalog[itemId] = data
+end
+
+return ShopService
+]]))
+
+			add("progression", scriptTemplate("QuestService", [[
+local QuestService = {}
+QuestService.__index = QuestService
+
+function QuestService.new()
+	return setmetatable({ active = {} }, QuestService)
+end
+
+function QuestService:grant(player, questId)
+	if not player then return end
+	self.active[player.UserId] = self.active[player.UserId] or {}
+	self.active[player.UserId][questId] = true
+end
+
+function QuestService:isComplete(player, questId)
+	if not player then return false end
+	local active = self.active[player.UserId]
+	return active and active[questId] == true or false
+end
+
+return QuestService
+]]))
+
+			add("progression", scriptTemplate("LevelService", [[
+local LevelService = {}
+LevelService.__index = LevelService
+
+function LevelService.new()
+	return setmetatable({ levels = {} }, LevelService)
+end
+
+function LevelService:set(player, level)
+	if player then
+		self.levels[player.UserId] = level
+	end
+end
+
+return LevelService
+]]))
+
+			add("progression", scriptTemplate("RewardService", [[
+local RewardService = {}
+
+function RewardService:grant(player, reward)
+	if player and reward then
+		return reward
+	end
+	return nil
+end
+
+return RewardService
+]]))
+
+			add("save", scriptTemplate("PlayerSessionService", [[
+local Players = game:GetService("Players")
+local PlayerSessionService = {}
+PlayerSessionService.__index = PlayerSessionService
+
+function PlayerSessionService.new()
+	local self = setmetatable({}, PlayerSessionService)
+	self.sessions = {}
+	return self
+end
+
+function PlayerSessionService:load(player)
+	if not player then return nil end
+	self.sessions[player.UserId] = self.sessions[player.UserId] or {}
+	return self.sessions[player.UserId]
+end
+
+function PlayerSessionService:save(player, state)
+	if player then
+		self.sessions[player.UserId] = state
+	end
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	if PlayerSessionService.sessions then
+		PlayerSessionService.sessions[player.UserId] = nil
+	end
+end)
+
+return PlayerSessionService
+]]))
+
+			add("save", scriptTemplate("DataSyncService", [[
+local DataSyncService = {}
+DataSyncService.__index = DataSyncService
+
+function DataSyncService.new()
+	return setmetatable({ data = {} }, DataSyncService)
+end
+
+function DataSyncService:write(key, value)
+	self.data[key] = value
+end
+
+return DataSyncService
+]]))
+
+			add("ui", scriptTemplate("NotificationService", [[
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local NotificationService = {}
+
+function NotificationService:send(player, title, body)
+	if player then
+		local remote = ReplicatedStorage:FindFirstChild("Notification")
+		if remote then
+			remote:FireClient(player, title, body)
+		end
+	end
+end
+
+return NotificationService
+]]))
+
+			add("ui", scriptTemplate("HUDService", [[
+local HUDService = {}
+
+function HUDService:sync(player, payload)
+	if player and payload then
+		return payload
+	end
+	return nil
+end
+
+return HUDService
+]]))
+
+			add("ui", scriptTemplate("MenuService", [[
+local MenuService = {}
+MenuService.__index = MenuService
+
+function MenuService.new()
+	return setmetatable({ open = {} }, MenuService)
+end
+
+function MenuService:openFor(player, menuName)
+	if player then
+		self.open[player.UserId] = menuName
+	end
+end
+
+return MenuService
+]]))
+
+			add("npc", scriptTemplate("NPCBrain", [[
+local NPCBrain = {}
+NPCBrain.__index = NPCBrain
+
+function NPCBrain.new()
+	return setmetatable({ state = "idle" }, NPCBrain)
+end
+
+function NPCBrain:think()
+	self.state = "patrol"
+end
+
+return NPCBrain
+]]))
+
+			add("npc", scriptTemplate("EnemySpawner", [[
+local EnemySpawner = {}
+EnemySpawner.__index = EnemySpawner
+
+function EnemySpawner.new()
+	return setmetatable({ queue = {} }, EnemySpawner)
+end
+
+function EnemySpawner:spawn(name)
+	table.insert(self.queue, name)
+end
+
+return EnemySpawner
+]]))
+
+			add("weather", scriptTemplate("WeatherController", [[
+local Lighting = game:GetService("Lighting")
+local WeatherController = {}
+WeatherController.__index = WeatherController
+
+function WeatherController.new()
+	return setmetatable({ state = "Clear" }, WeatherController)
+end
+
+function WeatherController:setState(value)
+	self.state = value
+	if value == "Rain" then
+		Lighting.ClockTime = 19
+	end
+end
+
+return WeatherController
+]]))
+
+			add("weather", scriptTemplate("SeasonService", [[
+local SeasonService = {}
+SeasonService.__index = SeasonService
+
+function SeasonService.new()
+	return setmetatable({ current = "Summer" }, SeasonService)
+end
+
+function SeasonService:set(name)
+	self.current = name
+end
+
+return SeasonService
+]]))
+
+			add("admin", scriptTemplate("AdminCommandService", [[
+local AdminCommandService = {}
+AdminCommandService.__index = AdminCommandService
+
+function AdminCommandService.new()
+	return setmetatable({ commands = {} }, AdminCommandService)
+end
+
+function AdminCommandService:register(name, callback)
+	self.commands[name] = callback
+end
+
+return AdminCommandService
+]]))
+
+			add("admin", scriptTemplate("ModerationService", [[
+local ModerationService = {}
+ModerationService.__index = ModerationService
+
+function ModerationService.new()
+	return setmetatable({ bans = {} }, ModerationService)
+end
+
+function ModerationService:ban(player, reason)
+	if player then
+		self.bans[player.UserId] = reason or "moderated"
+	end
+end
+
+return ModerationService
+]]))
+
+			add("teleport", scriptTemplate("TeleportService", [[
+local TeleportService = {}
+TeleportService.__index = TeleportService
+
+function TeleportService.new()
+	return setmetatable({ destinations = {} }, TeleportService)
+end
+
+function TeleportService:register(name, cframe)
+	self.destinations[name] = cframe
+end
+
+return TeleportService
+]]))
+
+			add("teleport", scriptTemplate("WarpController", [[
+local WarpController = {}
+WarpController.__index = WarpController
+
+function WarpController.new()
+	return setmetatable({ warps = {} }, WarpController)
+end
+
+function WarpController:register(name, part)
+	self.warps[name] = part
+end
+
+return WarpController
+]]))
+
+			add("vehicle", scriptTemplate("VehicleService", [[
+local VehicleService = {}
+VehicleService.__index = VehicleService
+
+function VehicleService.new()
+	return setmetatable({ active = {} }, VehicleService)
+end
+
+function VehicleService:enter(player, vehicleModel)
+	if player and vehicleModel then
+		self.active[player.UserId] = vehicleModel
+	end
+end
+
+function VehicleService:exit(player)
+	if player then
+		self.active[player.UserId] = nil
+	end
+end
+
+return VehicleService
+]]))
+
+			add("vehicle", scriptTemplate("VehicleUpgradeService", [[
+local VehicleUpgradeService = {}
+VehicleUpgradeService.__index = VehicleUpgradeService
+
+function VehicleUpgradeService.new()
+	return setmetatable({ upgrades = {} }, VehicleUpgradeService)
+end
+
+function VehicleUpgradeService:apply(vehicleModel, upgrade)
+	if vehicleModel then
+		self.upgrades[vehicleModel] = upgrade
+	end
+end
+
+return VehicleUpgradeService
+]]))
+
+			add("pet", scriptTemplate("PetService", [[
+local PetService = {}
+PetService.__index = PetService
+
+function PetService.new()
+	return setmetatable({ equipped = {} }, PetService)
+end
+
+function PetService:equip(player, petName)
+	if player and petName then
+		self.equipped[player.UserId] = petName
+	end
+end
+
+function PetService:unequip(player)
+	if player then
+		self.equipped[player.UserId] = nil
+	end
+end
+
+return PetService
+]]))
+
+			add("pet", scriptTemplate("PetEvolutionService", [[
+local PetEvolutionService = {}
+PetEvolutionService.__index = PetEvolutionService
+
+function PetEvolutionService.new()
+	return setmetatable({ stage = {} }, PetEvolutionService)
+end
+
+function PetEvolutionService:set(player, stage)
+	if player then
+		self.stage[player.UserId] = stage
+	end
+end
+
+return PetEvolutionService
+]]))
+
+			add("matchmaking", scriptTemplate("MatchmakingService", [[
+local MatchmakingService = {}
+MatchmakingService.__index = MatchmakingService
+
+function MatchmakingService.new()
+	return setmetatable({ queue = {} }, MatchmakingService)
+end
+
+function MatchmakingService:add(player)
+	if player then
+		table.insert(self.queue, player)
+	end
+end
+
+return MatchmakingService
+]]))
+
+			add("network", scriptTemplate("RemoteEventRouter", [[
+local RemoteEventRouter = {}
+
+function RemoteEventRouter.route(eventName, player, payload)
+	if eventName and player then
+		return { name = eventName, payload = payload, player = player.UserId }
+	end
+	return nil
+end
+
+return RemoteEventRouter
+]]))
+
+			add("collectible", scriptTemplate("CollectibleService", [[
+local CollectibleService = {}
+CollectibleService.__index = CollectibleService
+
+function CollectibleService.new()
+	return setmetatable({ found = {} }, CollectibleService)
+end
+
+function CollectibleService:grant(player, collectibleId)
+	if player and collectibleId then
+		self.found[player.UserId] = self.found[player.UserId] or {}
+		self.found[player.UserId][collectibleId] = true
+	end
+end
+
+return CollectibleService
+]]))
+
+			add("checkpoint", scriptTemplate("CheckpointService", [[
+local CheckpointService = {}
+CheckpointService.__index = CheckpointService
+
+function CheckpointService.new()
+	return setmetatable({ checkpoints = {} }, CheckpointService)
+end
+
+function CheckpointService:set(player, checkpoint)
+	if player then
+		self.checkpoints[player.UserId] = checkpoint
+	end
+end
+
+return CheckpointService
+]]))
+
+			add("camera", scriptTemplate("CameraRigService", [[
+local CameraRigService = {}
+CameraRigService.__index = CameraRigService
+
+function CameraRigService.new()
+	return setmetatable({ target = nil }, CameraRigService)
+end
+
+function CameraRigService:setTarget(target)
+	self.target = target
+end
+
+return CameraRigService
+]]))
+
+			add("boss", scriptTemplate("BossService", [[
+local BossService = {}
+BossService.__index = BossService
+
+function BossService.new()
+	return setmetatable({ bosses = {} }, BossService)
+end
+
+function BossService:register(name, state)
+	self.bosses[name] = state
+end
+
+return BossService
+]]))
+
+			add("crafting", scriptTemplate("CraftingService", [[
+local CraftingService = {}
+CraftingService.__index = CraftingService
+
+function CraftingService.new()
+	return setmetatable({ recipes = {} }, CraftingService)
+end
+
+function CraftingService:register(name, recipe)
+	self.recipes[name] = recipe
+end
+
+return CraftingService
+]]))
+
+			add("social", scriptTemplate("PartyService", [[
+local PartyService = {}
+PartyService.__index = PartyService
+
+function PartyService.new()
+	return setmetatable({ parties = {} }, PartyService)
+end
+
+function PartyService:create(player, partyId)
+	if player then
+		self.parties[player.UserId] = partyId
+	end
+end
+
+return PartyService
+]]))
+
+			add("world", scriptTemplate("ZoneService", [[
+local ZoneService = {}
+ZoneService.__index = ZoneService
+
+function ZoneService.new()
+	return setmetatable({ zones = {} }, ZoneService)
+end
+
+function ZoneService:register(name, zone)
+	self.zones[name] = zone
+end
+
+return ZoneService
+]]))
+
+			return registry
+		end
+
 		function ServerTemplateEngine:ApplyToGame(root)
 			if not root then
 				return { success = false, applied = {}, warnings = { "No root provided" } }
@@ -3541,33 +4314,73 @@ return TeleportService
 			repRoot.Name = "ReplicatedStorage"
 			repRoot.Parent = root
 
+			local library = buildTemplateLibrary()
 			local templates = {}
+			local addCategory = function(category)
+				if library[category] then
+					table.insert(templates, library[category])
+				end
+			end
+
 			if flags.combat or flags.weapon or flags.damage then
-				table.insert(templates, buildCombatTemplates(serverRoot))
+				addCategory("combat")
 			end
 			if flags.currency or flags.marketplace or flags.leaderstats then
-				table.insert(templates, buildEconomyTemplates(serverRoot, repRoot))
+				addCategory("economy")
 			end
 			if flags.quest or flags.npc or flags.ai then
-				table.insert(templates, buildProgressionTemplates(serverRoot, repRoot))
+				addCategory("progression")
+				if flags.npc or flags.ai then
+					addCategory("npc")
+				end
 			end
 			if flags.saving then
-				table.insert(templates, buildSaveTemplates(serverRoot))
+				addCategory("save")
 			end
 			if flags.weather then
-				table.insert(templates, buildEnvironmentTemplates(serverRoot, root:FindFirstChild("Lighting")))
+				addCategory("weather")
 			end
 			if flags.ui or flags.button then
-				table.insert(templates, buildUiTemplates(serverRoot, repRoot))
-			end
-			if flags.npc or flags.ai then
-				table.insert(templates, buildNpcTemplates(serverRoot))
+				addCategory("ui")
 			end
 			if flags.admin then
-				table.insert(templates, buildAdminTemplates(serverRoot))
+				addCategory("admin")
 			end
 			if flags.teleport then
-				table.insert(templates, buildTeleportTemplates(serverRoot, repRoot))
+				addCategory("teleport")
+			end
+			if flags.vehicle then
+				addCategory("vehicle")
+			end
+			if flags.pet then
+				addCategory("pet")
+			end
+			if flags.round or flags.matchmaking then
+				addCategory("matchmaking")
+			end
+			if flags.network then
+				addCategory("network")
+			end
+			if flags.collectible then
+				addCategory("collectible")
+			end
+			if flags.checkpoint then
+				addCategory("checkpoint")
+			end
+			if flags.camera then
+				addCategory("camera")
+			end
+			if flags.combat and flags.npc then
+				addCategory("boss")
+			end
+			if flags.combat and flags.currency then
+				addCategory("crafting")
+			end
+			if flags.ui or flags.round then
+				addCategory("social")
+			end
+			if flags.weather or flags.teleport or flags.checkpoint then
+				addCategory("world")
 			end
 
 			local applied = {}
