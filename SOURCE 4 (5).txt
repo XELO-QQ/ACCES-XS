@@ -448,6 +448,54 @@ do -- * Load Region of Déjà Vu
 			end
 		end
 	end
+
+	-- XELO STRONG HIDDEN-PROPERTY READER
+	-- Some executors (e.g. Potassium) expose gethiddenproperty that can read
+	-- PhysicalConfigData but returns an error for RenderData/CollisionData/
+	-- SurfaceData. Try every known reader so CSG geometry is never lost just
+	-- because one function is partial/stubbed.
+	local strongHiddenReaders = {}
+	do
+		local candidateNames = {
+			"gethiddenproperty", "gethiddenproperty_fallback", "getspecialproperty",
+			"getrawproperty", "getproperty", "getproperties", "getallproperties",
+			"getinstanceproperties", "getpropertyvalue",
+		}
+		local function addReader(fn)
+			if type(fn) == "function" then
+				for _, existing in ipairs(strongHiddenReaders) do
+					if existing == fn then return end
+				end
+				strongHiddenReaders[#strongHiddenReaders + 1] = fn
+			end
+		end
+		for _, name in ipairs(candidateNames) do
+			addReader(global_container[name])
+			addReader(getgenv and getgenv()[name])
+			addReader(_G and _G[name])
+			addReader(shared and shared[name])
+		end
+		addReader(gethiddenproperty)
+		addReader(gethiddenproperty_fallback)
+	end
+
+	local function xelo_strong_gethidden(instance, propertyName)
+		local firstErr
+		for _, reader in ipairs(strongHiddenReaders) do
+			local ok, value = pcall(reader, instance, propertyName)
+			if ok and value ~= nil and value ~= "" then
+				return value
+			end
+			if not ok and firstErr == nil then firstErr = value end
+		end
+		-- Last resort: direct index (some executors expose hidden props here).
+		local ok, value = pcall(function() return instance[propertyName] end)
+		if ok and value ~= nil and value ~= "" then
+			return value
+		end
+		return nil, firstErr
+	end
+
 	local function benchmark(f1, f2, ...)
 		local ranking = table.create(2)
 		for i, f in { f1, f2 } do
@@ -1543,21 +1591,28 @@ local function xelo_valid_hidden_value(value)
 end
 
 local function xelo_read_hidden_property(instance, propertyName)
+	-- Use the strong reader first: it tries gethiddenproperty, getspecialproperty,
+	-- fallback variants and direct index, so a partial executor API cannot hide
+	-- CSG geometry from the save.
+	local value = xelo_strong_gethidden(instance, propertyName)
+	if xelo_valid_hidden_value(value) then
+		return value
+	end
 	if gethiddenproperty then
-		local ok, value = pcall(gethiddenproperty, instance, propertyName)
-		if ok and xelo_valid_hidden_value(value) then
-			return value
+		local ok, v = pcall(gethiddenproperty, instance, propertyName)
+		if ok and xelo_valid_hidden_value(v) then
+			return v
 		end
 	end
 	if gethiddenproperty_fallback then
-		local ok, value = pcall(gethiddenproperty_fallback, instance, propertyName)
-		if ok and xelo_valid_hidden_value(value) then
-			return value
+		local ok, v = pcall(gethiddenproperty_fallback, instance, propertyName)
+		if ok and xelo_valid_hidden_value(v) then
+			return v
 		end
 	end
-	local ok, value = pcall(index, instance, propertyName)
-	if ok and xelo_valid_hidden_value(value) then
-		return value
+	local ok, v = pcall(index, instance, propertyName)
+	if ok and xelo_valid_hidden_value(v) then
+		return v
 	end
 end
 
@@ -2356,9 +2411,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		IgnoreSharedStrings = EXECUTOR_NAME ~= "Wave" and true,
 		SharedStringOverwrite = false,
-		-- Only unions whose geometry is actually readable stay as unions; all
-		-- others are flattened to Parts so they are never saved as empty shells.
-		TreatUnionsAsParts = true,
+		-- Keep unions as real UnionOperation objects. Flattening to Parts loses
+		-- their shape and makes them look "missing" in Studio. Potassium can
+		-- read PhysicalConfigData even when RenderData is blocked, so forcing
+		-- a flatten here destroys geometry that was previously saved fine.
+		TreatUnionsAsParts = EXECUTOR_NAME == "Solara",
 		SaveUnionGeometry = true,
 		PreloadStreamedMap = true,
 		StreamPreloadPoints = 600,
@@ -3114,7 +3171,16 @@ local ldeccache = GLOBAL_ENV.scriptcache
 		end
 
 		if special then
-			if gethiddenproperty then
+			-- XELO: try every hidden-property reader before giving up. Potassium's
+			-- gethiddenproperty can read PhysicalConfigData but errors on RenderData;
+			-- another reader in the executor may still expose it.
+			local strong = xelo_strong_gethidden(instance, propertyName)
+			if strong ~= nil and not filterPropVal(strong, propertyName, category)
+				and not (type(strong) == "string" and #strong < 8
+					and (string.find(string.lower(strong), "unable", 1, true)
+						or string.find(string.lower(strong), "error", 1, true))) then
+				raw = strong
+			elseif gethiddenproperty then
 				local ok, result = pcall(gethiddenproperty, instance, propertyName)
 
 				if ok then
