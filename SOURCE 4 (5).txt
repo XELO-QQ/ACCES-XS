@@ -2361,8 +2361,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		TreatUnionsAsParts = true,
 		SaveUnionGeometry = true,
 		PreloadStreamedMap = true,
-		StreamPreloadPoints = 360,
-		StreamPreloadTimeout = 1.5,
+		StreamPreloadPoints = 600,
+		-- Keep requested chunks pinned until serialization finishes. A short
+		-- timeout lets early sweep zones stream out again before the save starts.
+		StreamPreloadTimeout = 300,
 		AlternativeWritefile = not ArrayToDict({ "WRD", "Xeno", "Zorara" })[EXECUTOR_NAME],
 
 		OptionsAliases = { -- You can't really modify these as a user
@@ -2566,7 +2568,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	     box seeded only from loaded parts still cuts the map off. Seed from what
 	     is loaded, then expand to a guaranteed minimum span and sweep a capped
 	     grid with RequestStreamAroundAsync before any serialization starts. ]]
-	local function xelo_preload_streamed_map()
+		local function xelo_preload_streamed_map()
 		if OPTIONS.PreloadStreamedMap == false then
 			return 0, "preload disabled"
 		end
@@ -2590,16 +2592,20 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end)
 
-		local hrp, savedCF
+		local hrp, savedCF, savedAnchored
 		pcall(function()
 			local plr = game:GetService("Players").LocalPlayer
 			hrp = plr and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
-			if hrp then savedCF = hrp.CFrame end
+			if hrp then
+				savedCF = hrp.CFrame
+				savedAnchored = hrp.Anchored
+			end
 		end)
 		if not canRequest and not hrp then
 			return 0, "no stream preload method available"
 		end
 
+		local teleportY = hrp and hrp.Position.Y or 0
 		local targetRadius = 1000
 		pcall(function() targetRadius = tonumber(ws.StreamingTargetRadius) or 1000 end)
 		targetRadius = math.clamp(targetRadius, 100, 5000)
@@ -2634,10 +2640,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		local pointCap = tonumber(OPTIONS.StreamPreloadPoints) or 600
 		pointCap = math.clamp(pointCap, 16, 5000)
-		local timeout = tonumber(OPTIONS.StreamPreloadTimeout) or 1
-		timeout = math.clamp(timeout, 0.1, 10)
+		local timeout = tonumber(OPTIONS.StreamPreloadTimeout) or 300
+		timeout = math.clamp(timeout, 0.1, 600)
+		local stepWait = hrp and 0.15 or 0.08
 
-		local step = math.clamp(targetRadius * 1.6, 250, 3000)
+		local step = math.clamp(targetRadius * 0.8, 200, 1200)
 		local nx = math.max(1, math.ceil((maxX - minX) / step) + 1)
 		local nz = math.max(1, math.ceil((maxZ - minZ) / step) + 1)
 		if nx * nz > pointCap then
@@ -2647,41 +2654,39 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			nz = math.max(1, math.ceil((maxZ - minZ) / step) + 1)
 		end
 
+		-- Anchor while sweeping so the character does not fall between zones.
+		if hrp then pcall(function() hrp.Anchored = true end) end
+
 		local count = 0
 		for ix = 0, nx - 1 do
 			for iz = 0, nz - 1 do
-				local pos = Vector3.new(minX + ix * step, 0, minZ + iz * step)
+				local px = minX + ix * step
+				local pz = minZ + iz * step
 				if canRequest then
 					pcall(function()
-						ws:RequestStreamAroundAsync(pos, timeout)
+						ws:RequestStreamAroundAsync(Vector3.new(px, teleportY, pz), timeout)
 					end)
-				elseif hrp then
-					pcall(function()
-						hrp.CFrame = CFrame.new(pos.X, hrp.Position.Y, pos.Z)
-					end)
-					task.wait(0.05)
+				end
+				if hrp then
+					pcall(function() hrp.CFrame = CFrame.new(px, teleportY, pz) end)
 				end
 				count += 1
-				task.wait(0.02)
+				task.wait(stepWait)
 			end
 		end
 
-		-- The last batch can still be in flight when the callback returns.
-		task.wait(math.min(3, math.max(0.5, timeout)))
-
-		if not canRequest and savedCF then
+		if hrp and savedCF then
 			pcall(function()
-				local plr = game:GetService("Players").LocalPlayer
-				local root = plr and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
-				if root then root.CFrame = savedCF end
+				hrp.CFrame = savedCF
+				hrp.Anchored = savedAnchored
 			end)
 		end
+		task.wait(1.5)
 
 		GLOBAL_ENV.XELO_MAP_PRELOADED = true
 		return count, ("preloaded %d zones (step %d)"):format(count, math.floor(step))
 	end
-
-	local ldeccache = GLOBAL_ENV.scriptcache
+local ldeccache = GLOBAL_ENV.scriptcache
 
 	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNotCreatableWillBeEnabled, RecoveredScripts
 
