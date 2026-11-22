@@ -1500,6 +1500,159 @@ if CLIENT_VERSION < math.huge then -- math.huge because unknown yet
 	XML_Descriptors.Content = XML_Descriptors.ContentId
 end
 
+-- PartOperation.AssetId arrives as a raw number on some clients and as a
+-- "rbxassetid://..." string on others. This descriptor normalizes both and
+-- always emits the modern Content tag, so the union always resolves in Studio.
+XML_Descriptors.XeloAssetId = function(raw)
+	local value = tostring(raw)
+	local id = tonumber(value)
+	if id and id > 0 and id == math.floor(id) then
+		value = "rbxassetid://" .. tostring(id)
+	elseif value:sub(1, 12) ~= "rbxassetid://" then
+		value = "rbxassetid://" .. value
+	end
+	return "<url>" .. XML_Descriptors.string(value) .. "</url>", "Content"
+end
+
+--[[ XELO UNION FIX (baked into the engine)
+     PartOperation geometry lives in hidden properties. Studio can rebuild a
+     union from PartOperation.AssetId (a PartOperationAsset) as long as we emit
+     it as a Content URL, plus a valid CSGPHS placeholder for PhysicalConfigData.
+     Everything here is idempotent so the main script's runtime patcher can no-op. ]]
+local XELO_UNION_API_INJECTED = true
+
+local function xelo_read_hidden_property(instance, propertyName)
+	if gethiddenproperty then
+		local ok, value = pcall(gethiddenproperty, instance, propertyName)
+		if ok and value ~= nil and value ~= "" then
+			return value
+		end
+	end
+	if gethiddenproperty_fallback then
+		local ok, value = pcall(gethiddenproperty_fallback, instance, propertyName)
+		if ok and value ~= nil and value ~= "" then
+			return value
+		end
+	end
+	local ok, value = pcall(index, instance, propertyName)
+	if ok and value ~= nil and value ~= "" then
+		return value
+	end
+end
+
+local function xelo_union_asset_url(instance)
+	local id = tonumber(xelo_read_hidden_property(instance, "AssetId"))
+	if not id or id <= 0 then
+		return nil
+	end
+	return "rbxassetid://" .. tostring(math.floor(id))
+end
+
+local function xelo_union_geometry_readable(instance)
+	if xelo_union_asset_url(instance) then
+		return true
+	end
+	for _, name in ipairs({ "PhysicalConfigData", "RenderData", "CollisionData", "SurfaceData", "MeshData" }) do
+		local value = xelo_read_hidden_property(instance, name)
+		if value ~= nil and value ~= "" then
+			return true
+		end
+	end
+	return false
+end
+
+local XELO_PHYSICAL_CONFIG_BASE =
+	"\67\83\71\80\72\83\8\0\0\0\2\0\40\181\47\253\32\180\149\1\0\120\0\120\32\193\32\65\65\2\12\1\3\2\1\12\193\16\160\112\242\1\176\106\234\58\123\18\99\238\29\229\253\198\101\127\68\150\204\66\96\179\97\185\59\111\222\22\115\2\106"
+local XELO_CF = Enum.CollisionFidelity
+local XELO_PHYSICAL_CONFIG_BY_CF = {
+	[XELO_CF.Box] = "\67\83\71\80\72\83\0\0\0\0\66\76\79\67\75",
+}
+do
+	local base = XELO_PHYSICAL_CONFIG_BASE
+	local prefix = string.sub(base, 1, 10)
+	local suffix = string.sub(base, 12)
+	local byteMap = {
+		Hull = 1,
+		Default = 2,
+		PreciseConvexDecomposition = 3,
+		Tunable = 7,
+	}
+	for name, byte in byteMap do
+		local cf = XELO_CF[name]
+		if cf then
+			XELO_PHYSICAL_CONFIG_BY_CF[cf] = prefix .. string.char(byte) .. suffix
+		end
+	end
+end
+
+local function xelo_inject_union_api_properties(classList)
+	if type(classList) ~= "table" then
+		return classList
+	end
+	local function ensure(className, superclass, propertyTemplates)
+		local entry = classList[className]
+		if not entry then
+			entry = { Properties = {}, Superclass = superclass }
+			classList[className] = entry
+		end
+		entry.Properties = entry.Properties or {}
+		for _, template in ipairs(propertyTemplates) do
+			local found = false
+			for i, existing in ipairs(entry.Properties) do
+				if existing.Name == template.Name then
+					-- Replace the dump's weak definition with the explicit one
+					-- so hidden geometry is always read + serialized correctly.
+					local property = table.clone(template)
+					property.CanRead = nil
+					entry.Properties[i] = property
+					found = true
+					break
+				end
+			end
+			if not found then
+				local property = table.clone(template)
+				property.CanRead = nil
+				table.insert(entry.Properties, property)
+			end
+		end
+	end
+	local sharedTemplates = {
+		{ Name = "RenderData", Category = "Hidden", ValueType = "SharedString", Special = true },
+		{ Name = "CollisionData", Category = "Hidden", ValueType = "SharedString", Special = true },
+		{ Name = "SurfaceData", Category = "Hidden", ValueType = "SharedString", Special = true },
+	}
+	local assetTemplate = {
+		Name = "AssetId",
+		Category = "DataType",
+		ValueType = "XeloAssetId",
+		Special = true,
+		Fallback = function(instance)
+			return xelo_union_asset_url(instance)
+		end,
+	}
+	local physicalTemplate = {
+		Name = "PhysicalConfigData",
+		Category = "Hidden",
+		ValueType = "SharedString",
+		Special = true,
+	}
+	local meshTemplate = { Name = "MeshData", Category = "Hidden", ValueType = "SharedString", Special = true }
+	local function unionTemplates()
+		local result = { assetTemplate, physicalTemplate }
+		for _, template in ipairs(sharedTemplates) do
+			result[#result + 1] = template
+		end
+		return result
+	end
+	pcall(function()
+		-- UnionOperation / IntersectionOperation inherit PartOperation, so one
+		-- injection on the base class covers them without emitting duplicate tags.
+		ensure("PartOperation", "BasePart", unionTemplates())
+		ensure("MeshPart", "TriangleMeshPart", { physicalTemplate, meshTemplate })
+	end)
+	return classList
+end
+
 local ClassList
 
 do
@@ -1827,7 +1980,9 @@ do
 				end
 			end
 
-			writefile(CLIENT_VERSION_str, API_Dump)
+			if API_Dump then
+				pcall(writefile, CLIENT_VERSION_str, API_Dump)
+			end
 		end)
 
 		if not ok or not API_Dump then
@@ -1964,6 +2119,7 @@ do
 
 		-- classList.Instance.Properties.Parent = nil -- ? Not sure if this is a better option than filtering through properties to remove this
 
+		xelo_inject_union_api_properties(classList)
 		return classList
 	end
 
@@ -2161,6 +2317,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreSharedStrings = EXECUTOR_NAME ~= "Wave" and true,
 		SharedStringOverwrite = false,
 		TreatUnionsAsParts = EXECUTOR_NAME == "Solara", -- TODO Temporary true (once removed, remove Note from docs too)
+		SaveUnionGeometry = true,
+		PreloadStreamedMap = true,
+		StreamPreloadPoints = 360,
+		StreamPreloadTimeout = 1.5,
 		AlternativeWritefile = not ArrayToDict({ "WRD", "Xeno", "Zorara" })[EXECUTOR_NAME],
 
 		OptionsAliases = { -- You can't really modify these as a user
@@ -2338,7 +2498,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local IgnorePropertiesOfNotScriptsOnScriptsMode = OPTIONS.IgnorePropertiesOfNotScriptsOnScriptsMode
 
 	local old_gethiddenproperty
-	if OPTIONS and gethiddenproperty then
+	if OPTIONS.IgnoreSpecialProperties and gethiddenproperty then
 		old_gethiddenproperty = gethiddenproperty
 		gethiddenproperty = nil
 	end
@@ -2356,6 +2516,128 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local IgnoreSharedStrings = OPTIONS.IgnoreSharedStrings
 	local SharedStringOverwrite = OPTIONS.SharedStringOverwrite
+	local keepUnionGeometry = OPTIONS.SaveUnionGeometry ~= false
+
+	--[[ XELO LARGE-MAP FIX
+	     StreamingEnabled clients only hold the chunks around the character.
+	     Anything streamed out is invisible to GetDescendants(), so a bounding
+	     box seeded only from loaded parts still cuts the map off. Seed from what
+	     is loaded, then expand to a guaranteed minimum span and sweep a capped
+	     grid with RequestStreamAroundAsync before any serialization starts. ]]
+	local function xelo_preload_streamed_map()
+		if OPTIONS.PreloadStreamedMap == false then
+			return 0, "preload disabled"
+		end
+		if GLOBAL_ENV.XELO_MAP_PRELOADED then
+			return 0, "already preloaded by host script"
+		end
+
+		local ws = workspace
+		local okStream, streamingEnabled = pcall(function()
+			return ws.StreamingEnabled == true
+		end)
+		if not okStream or not streamingEnabled then
+			return 0, "streaming off"
+		end
+
+		local canRequest = false
+		pcall(function()
+			if type(ws.RequestStreamAroundAsync) == "function" then
+				ws:RequestStreamAroundAsync(Vector3.new(0, 0, 0), 0)
+				canRequest = true
+			end
+		end)
+
+		local hrp, savedCF
+		pcall(function()
+			local plr = game:GetService("Players").LocalPlayer
+			hrp = plr and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+			if hrp then savedCF = hrp.CFrame end
+		end)
+		if not canRequest and not hrp then
+			return 0, "no stream preload method available"
+		end
+
+		local targetRadius = 1000
+		pcall(function() targetRadius = tonumber(ws.StreamingTargetRadius) or 1000 end)
+		targetRadius = math.clamp(targetRadius, 100, 5000)
+
+		local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+		pcall(function()
+			for _, obj in ipairs(ws:GetDescendants()) do
+				if obj:IsA("BasePart") then
+					local p = obj.Position
+					if p.X < minX then minX = p.X end
+					if p.X > maxX then maxX = p.X end
+					if p.Z < minZ then minZ = p.Z end
+					if p.Z > maxZ then maxZ = p.Z end
+				end
+			end
+		end)
+		if hrp then
+			local p = hrp.Position
+			minX = math.min(minX, p.X)
+			maxX = math.max(maxX, p.X)
+			minZ = math.min(minZ, p.Z)
+			maxZ = math.max(maxZ, p.Z)
+		end
+		if minX == math.huge then
+			minX, maxX, minZ, maxZ = 0, 0, 0, 0
+		end
+
+		local span = math.max(targetRadius * 16, 16384)
+		local cx, cz = (minX + maxX) / 2, (minZ + maxZ) / 2
+		minX, maxX = cx - span / 2, cx + span / 2
+		minZ, maxZ = cz - span / 2, cz + span / 2
+
+		local pointCap = tonumber(OPTIONS.StreamPreloadPoints) or 600
+		pointCap = math.clamp(pointCap, 16, 5000)
+		local timeout = tonumber(OPTIONS.StreamPreloadTimeout) or 1
+		timeout = math.clamp(timeout, 0.1, 10)
+
+		local step = math.clamp(targetRadius * 1.6, 250, 3000)
+		local nx = math.max(1, math.ceil((maxX - minX) / step) + 1)
+		local nz = math.max(1, math.ceil((maxZ - minZ) / step) + 1)
+		if nx * nz > pointCap then
+			local scale = math.sqrt((nx * nz) / pointCap)
+			step *= scale
+			nx = math.max(1, math.ceil((maxX - minX) / step) + 1)
+			nz = math.max(1, math.ceil((maxZ - minZ) / step) + 1)
+		end
+
+		local count = 0
+		for ix = 0, nx - 1 do
+			for iz = 0, nz - 1 do
+				local pos = Vector3.new(minX + ix * step, 0, minZ + iz * step)
+				if canRequest then
+					pcall(function()
+						ws:RequestStreamAroundAsync(pos, timeout)
+					end)
+				elseif hrp then
+					pcall(function()
+						hrp.CFrame = CFrame.new(pos.X, hrp.Position.Y, pos.Z)
+					end)
+					task.wait(0.05)
+				end
+				count += 1
+				task.wait(0.02)
+			end
+		end
+
+		-- The last batch can still be in flight when the callback returns.
+		task.wait(math.min(3, math.max(0.5, timeout)))
+
+		if not canRequest and savedCF then
+			pcall(function()
+				local plr = game:GetService("Players").LocalPlayer
+				local root = plr and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+				if root then root.CFrame = savedCF end
+			end)
+		end
+
+		GLOBAL_ENV.XELO_MAP_PRELOADED = true
+		return count, ("preloaded %d zones (step %d)"):format(count, math.floor(step))
+	end
 
 	local ldeccache = GLOBAL_ENV.scriptcache
 
@@ -2799,8 +3081,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						if __DEBUG_MODE then
 							__DEBUG_MODE("Filtered", propertyName)
 						end
+						-- XELO: do not poison the property globally; hidden properties can
+						-- be readable on one instance and unreadable on the next one.
 						-- Property.Special = false
-						property.CanRead = false
 					end
 
 					return __BREAK -- ? We skip it because even if we use "" it will just reset to default in most cases, unless it's a string tag for example (same as not being defined)
@@ -2990,7 +3273,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						continue -- They won't show up in Studio anyway (Enable SaveNotCreatable if you wish to bypass this)
 					end
 				else -- ! Assuming nothing that is a PartOperation or inherits from it is in NotCreatableFixes
-					if TreatUnionsAsParts and instance:IsA("PartOperation") then
+					if TreatUnionsAsParts and instance:IsA("PartOperation")
+						and not xelo_union_geometry_readable(instance) then
 						ClassName, InstanceOverride = "Part", replaceClassName(instance, InstanceName, ClassName)
 						ClassNameOverride = "BasePart" -- * Mutual Superclass for PartOperation and Part; For properties only
 					elseif not ClassList[ClassName] then -- ? API Dump is outdated then
@@ -3055,7 +3339,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 						local ValueType = Property.ValueType
 
-						if IgnoreSharedStrings and ValueType == "SharedString" then -- ? More info in Options
+						local isUnionGeometry = keepUnionGeometry
+							and instance:IsA("PartOperation")
+							and (
+								PropertyName == "RenderData"
+								or PropertyName == "CollisionData"
+								or PropertyName == "SurfaceData"
+								or PropertyName == "PhysicalConfigData"
+							)
+						local isPhysicalConfig = PropertyName == "PhysicalConfigData" and instance:IsA("TriangleMeshPart")
+						if IgnoreSharedStrings and ValueType == "SharedString"
+							and not isUnionGeometry and not isPhysicalConfig then -- ? More info in Options
 							continue
 						end
 
@@ -3073,6 +3367,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						local Category, Optional = Property.Category, Property.Optional
 
 						local raw = ReadProperty(instance, Property, PropertyName, Special, Category, Optional)
+
+						-- Real PhysicalConfigData is almost always unreadable outside
+						-- Studio. Fall back to a minimal CSGPHS blob matching the part's
+						-- CollisionFidelity so the union/MeshPart stays loadable and
+						-- visible; Studio rebuilds the actual collision from mesh data.
+						if PropertyName == "PhysicalConfigData" and instance:IsA("TriangleMeshPart")
+							and XELO_PHYSICAL_CONFIG_BY_CF
+							and (raw == __BREAK or raw == nil or raw == "") then
+							raw = XELO_PHYSICAL_CONFIG_BY_CF[instance.CollisionFidelity]
+								or XELO_PHYSICAL_CONFIG_BY_CF[Enum.CollisionFidelity.Default]
+						end
 
 						if raw == __BREAK then -- ! Assuming __BREAK is always returned when there's a failure to read a property
 							local ok, result = pcall(gethiddenproperty_fallback, instance, PropertyName) -- * This helps in reading: Vector3int16, OptionalCoordinateFrame DataTypes. It also acts as an almost entire fallback for gethiddenproperty in case it is missing
@@ -3316,6 +3621,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local function save_game()
+		pcall(xelo_preload_streamed_map)
 		do
 			if IsModel then
 				--[[ 
