@@ -1504,11 +1504,17 @@ end
 -- "rbxassetid://..." string on others. This descriptor normalizes both and
 -- always emits the modern Content tag, so the union always resolves in Studio.
 XML_Descriptors.XeloAssetId = function(raw)
+	if raw == nil or raw == "" then
+		return "<null></null>", "Content"
+	end
 	local value = tostring(raw)
 	local id = tonumber(value)
-	if id and id > 0 and id == math.floor(id) then
-		value = "rbxassetid://" .. tostring(id)
-	elseif value:sub(1, 12) ~= "rbxassetid://" then
+	if id then
+		if id <= 0 or id ~= math.floor(id) then
+			return "<null></null>", "Content"
+		end
+		value = "rbxassetid://" .. tostring(math.floor(id))
+	elseif string.find(value, "rbxassetid://", 1, true) ~= 1 then
 		value = "rbxassetid://" .. value
 	end
 	return "<url>" .. XML_Descriptors.string(value) .. "</url>", "Content"
@@ -1521,28 +1527,54 @@ end
      Everything here is idempotent so the main script's runtime patcher can no-op. ]]
 local XELO_UNION_API_INJECTED = true
 
+local function xelo_valid_hidden_value(value)
+	if value == nil or value == "" then
+		return false
+	end
+	if type(value) == "string" then
+		local v = string.lower(value)
+		if string.find(v, "can't get value", 1, true)
+			or string.find(v, "unable to get property", 1, true)
+			or string.find(v, "not scriptable", 1, true) then
+			return false
+		end
+	end
+	return true
+end
+
 local function xelo_read_hidden_property(instance, propertyName)
 	if gethiddenproperty then
 		local ok, value = pcall(gethiddenproperty, instance, propertyName)
-		if ok and value ~= nil and value ~= "" then
+		if ok and xelo_valid_hidden_value(value) then
 			return value
 		end
 	end
 	if gethiddenproperty_fallback then
 		local ok, value = pcall(gethiddenproperty_fallback, instance, propertyName)
-		if ok and value ~= nil and value ~= "" then
+		if ok and xelo_valid_hidden_value(value) then
 			return value
 		end
 	end
 	local ok, value = pcall(index, instance, propertyName)
-	if ok and value ~= nil and value ~= "" then
+	if ok and xelo_valid_hidden_value(value) then
 		return value
 	end
 end
 
 local function xelo_union_asset_url(instance)
-	local id = tonumber(xelo_read_hidden_property(instance, "AssetId"))
-	if not id or id <= 0 then
+	local raw = xelo_read_hidden_property(instance, "AssetId")
+	if raw == nil then
+		return nil
+	end
+	if type(raw) == "string" and string.find(raw, "rbxassetid://", 1, true) == 1 then
+		local id = tonumber(string.match(raw, "%d+"))
+		if id and id > 0 then
+			return "rbxassetid://" .. tostring(math.floor(id))
+		end
+		return nil
+	end
+	local id = tonumber(raw)
+	if not id or id <= 0 or id ~= math.floor(id) then
 		return nil
 	end
 	return "rbxassetid://" .. tostring(math.floor(id))
@@ -1552,9 +1584,17 @@ local function xelo_union_geometry_readable(instance)
 	if xelo_union_asset_url(instance) then
 		return true
 	end
-	for _, name in ipairs({ "PhysicalConfigData", "RenderData", "CollisionData", "SurfaceData", "MeshData" }) do
+	-- PhysicalConfigData is intentionally NOT part of this check: it is only a
+	-- collision hull. A union with a readable CSGPHS blob but no AssetId and no
+	-- RenderData still has no visible geometry and must be flattened to a Part.
+	for _, name in ipairs({ "RenderData", "CollisionData", "SurfaceData", "MeshData" }) do
 		local value = xelo_read_hidden_property(instance, name)
-		if value ~= nil and value ~= "" then
+		if typeof and typeof(value) == "SharedString" then
+			return true
+		end
+		-- Geometry blobs are long binary data; short strings are executor
+		-- error placeholders such as "can't get value" or "null".
+		if type(value) == "string" and #value >= 16 then
 			return true
 		end
 	end
@@ -2316,7 +2356,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		IgnoreSharedStrings = EXECUTOR_NAME ~= "Wave" and true,
 		SharedStringOverwrite = false,
-		TreatUnionsAsParts = EXECUTOR_NAME == "Solara", -- TODO Temporary true (once removed, remove Note from docs too)
+		-- Only unions whose geometry is actually readable stay as unions; all
+		-- others are flattened to Parts so they are never saved as empty shells.
+		TreatUnionsAsParts = true,
 		SaveUnionGeometry = true,
 		PreloadStreamedMap = true,
 		StreamPreloadPoints = 360,
