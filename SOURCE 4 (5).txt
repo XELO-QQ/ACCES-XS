@@ -449,53 +449,6 @@ do -- * Load Region of Déjà Vu
 		end
 	end
 
-	-- XELO STRONG HIDDEN-PROPERTY READER
-	-- Some executors (e.g. Potassium) expose gethiddenproperty that can read
-	-- PhysicalConfigData but returns an error for RenderData/CollisionData/
-	-- SurfaceData. Try every known reader so CSG geometry is never lost just
-	-- because one function is partial/stubbed.
-	local strongHiddenReaders = {}
-	do
-		local candidateNames = {
-			"gethiddenproperty", "gethiddenproperty_fallback", "getspecialproperty",
-			"getrawproperty", "getproperty", "getproperties", "getallproperties",
-			"getinstanceproperties", "getpropertyvalue",
-		}
-		local function addReader(fn)
-			if type(fn) == "function" then
-				for _, existing in ipairs(strongHiddenReaders) do
-					if existing == fn then return end
-				end
-				strongHiddenReaders[#strongHiddenReaders + 1] = fn
-			end
-		end
-		for _, name in ipairs(candidateNames) do
-			addReader(global_container[name])
-			addReader(getgenv and getgenv()[name])
-			addReader(_G and _G[name])
-			addReader(shared and shared[name])
-		end
-		addReader(gethiddenproperty)
-		addReader(gethiddenproperty_fallback)
-	end
-
-	local function xelo_strong_gethidden(instance, propertyName)
-		local firstErr
-		for _, reader in ipairs(strongHiddenReaders) do
-			local ok, value = pcall(reader, instance, propertyName)
-			if ok and value ~= nil and value ~= "" then
-				return value
-			end
-			if not ok and firstErr == nil then firstErr = value end
-		end
-		-- Last resort: direct index (some executors expose hidden props here).
-		local ok, value = pcall(function() return instance[propertyName] end)
-		if ok and value ~= nil and value ~= "" then
-			return value
-		end
-		return nil, firstErr
-	end
-
 	local function benchmark(f1, f2, ...)
 		local ranking = table.create(2)
 		for i, f in { f1, f2 } do
@@ -654,6 +607,52 @@ return ARequireController
 			end
 		end
 	end
+end
+
+-- XELO STRONG HIDDEN-PROPERTY READER (file scope)
+-- Declared outside the "Load Region of Déjà Vu" do-block so it is visible to
+-- both xelo_read_hidden_property and ReadProperty. Some executors (Potassium)
+-- expose gethiddenproperty that reads PhysicalConfigData but errors on
+-- RenderData/CollisionData/SurfaceData; try every known reader instead.
+local strongHiddenReaders = {}
+do
+	local candidateNames = {
+		"gethiddenproperty", "gethiddenproperty_fallback", "getspecialproperty",
+		"getrawproperty", "getproperty", "getproperties", "getallproperties",
+		"getinstanceproperties", "getpropertyvalue",
+	}
+	local function addReader(fn)
+		if type(fn) == "function" then
+			for _, existing in ipairs(strongHiddenReaders) do
+				if existing == fn then return end
+			end
+			strongHiddenReaders[#strongHiddenReaders + 1] = fn
+		end
+	end
+	for _, name in ipairs(candidateNames) do
+		addReader(global_container[name])
+		addReader(getgenv and getgenv()[name])
+		addReader(_G and _G[name])
+		addReader(shared and shared[name])
+	end
+	addReader(gethiddenproperty)
+	addReader(gethiddenproperty_fallback)
+end
+
+local function xelo_strong_gethidden(instance, propertyName)
+	local firstErr
+	for _, reader in ipairs(strongHiddenReaders) do
+		local ok, value = pcall(reader, instance, propertyName)
+		if ok and value ~= nil and value ~= "" then
+			return value
+		end
+		if not ok and firstErr == nil then firstErr = value end
+	end
+	local ok, value = pcall(function() return instance[propertyName] end)
+	if ok and value ~= nil and value ~= "" then
+		return value
+	end
+	return nil, firstErr
 end
 
 -- local custom_decompiler
