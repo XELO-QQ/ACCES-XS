@@ -231,25 +231,148 @@ end
 
 local global_container
 do
-	local filename = "UniversalMethodFinder"
+	local filename = "UniversalMethodFinder (embedded)"
+
+	-- Vendored because https://github.com/luau/SomeHub (and its raw files) are now 404.
+	-- Mirrored from: https://github.com/gmh5225/SomeHub-/blob/main/UniversalMethodFinder.luau
+	local UNIVERSAL_METHOD_FINDER_SOURCE = [==[
+--!optimize 2
+
+local globalenv = getgenv and getgenv() or _G or shared
+local globalcontainer = globalenv.globalcontainer
+
+if not globalcontainer then
+	globalcontainer = {}
+	globalenv.globalcontainer = globalcontainer
+end
+
+local genvs = { _G, shared } -- Could become an issue if the latest function it gets is unaccessible by client
+if getgenv then
+	table.insert(genvs, getgenv())
+end
+-- if getrenv then -- Add this if you wish to search through game's env (normal Scripts)
+-- 	table.insert(genvs, 1, getrenv())
+-- end
+-- if debug and debug.getregistry then
+-- 	table.insert(genvs, 1, debug.getregistry()._LOADED) -- Includes things like string / table / math library tables etc. Basically everything roblox offers, but due to being too huge you should specify library tables by attaching ".string" or to LOADED; adding "_G" to this will link a globals table. That way the finder will have to scan way less.
+-- end
+
+local calllimit = 0
+do
+	local function determineCalllimit()
+		calllimit = calllimit + 1
+		determineCalllimit()
+	end
+	pcall(determineCalllimit)
+end
+
+local function isEmpty(dict)
+	for _ in next, dict do
+		return
+	end
+	return true
+end
+
+local depth, printresults, hardlimit, query, antioverflow, matchedall -- prevents infinite / cross-reference
+local function recurseEnv(env, envname)
+	if globalcontainer == env then
+		return
+	end
+	if antioverflow[env] then
+		return
+	end
+	antioverflow[env] = true
+
+	depth = depth + 1
+	for name, val in next, env do
+		if matchedall then
+			break
+		end
+
+		local Type = type(val)
+
+		if Type == "table" then
+			if depth < hardlimit then
+				recurseEnv(val, name)
+			else
+				-- warn("almost stack overflow")
+			end
+		elseif Type == "function" then -- This optimizes the speeds but if someone manages (??) to fool this then rip
+			name = string.lower(tostring(name))
+			local matched
+			for methodname, pattern in next, query do
+				if pattern(name, envname) then
+					globalcontainer[methodname] = val
+					if not matched then
+						matched = {}
+					end
+					table.insert(matched, methodname)
+					if printresults then
+						print(methodname, name)
+					end
+				end
+			end
+			if matched then
+				for _, methodname in next, matched do
+					query[methodname] = nil
+				end
+				matchedall = isEmpty(query)
+				if matchedall then
+					break
+				end
+			end
+		end
+	end
+	depth = depth - 1
+end
+
+local function finder(Query, ForceSearch, CustomCallLimit, PrintResults)
+	antioverflow = {}
+	query = {}
+
+	do -- Load patterns
+		local function Find(String, Pattern)
+			return string.find(String, Pattern, nil, true)
+		end
+		for methodname, pattern in next, Query do
+			if not globalcontainer[methodname] or ForceSearch then
+				if not Find(pattern, "return") then
+					pattern = "return " .. pattern
+				end
+				query[methodname] = loadstring(pattern)
+			end
+		end
+	end
+
+	depth = 0
+	printresults = PrintResults
+	hardlimit = CustomCallLimit or calllimit
+
+	recurseEnv(genvs)
+
+	-- fallback to __index inheritance
+	do
+		local env = getfenv()
+		for methodname in next, Query do
+			if not globalcontainer[methodname] then
+				globalcontainer[methodname] = env[methodname]
+			end
+		end
+	end
+
+	hardlimit = nil
+	depth = nil
+	printresults = nil
+
+	antioverflow = nil
+	query = nil
+end
+
+return finder, globalcontainer
+]==]
 
 	local finder
-	local finderUrl = "https://raw.githubusercontent.com/luau/SomeHub/main/" .. filename .. ".luau"
-	local httpOk, finderSource = pcall(function()
-		return game:HttpGet(finderUrl, true)
-	end)
-	assert(httpOk and type(finderSource) == "string" and #finderSource > 0,
-		"XELO save engine: failed to download UniversalMethodFinder: " .. tostring(finderSource))
-	local compileOk, finderChunk = pcall(loadstring, finderSource, filename)
-	assert(compileOk and type(finderChunk) == "function",
-		"XELO save engine: UniversalMethodFinder compile failed: " .. tostring(finderChunk))
-	local runOk, finderResult = pcall(finderChunk)
-	assert(runOk and type(finderResult) == "function",
-		"XELO save engine: UniversalMethodFinder returned no finder function: " .. tostring(finderResult))
-	finder, global_container = finderResult()
-
-	assert(type(finder) == "function" and type(global_container) == "table",
-		"XELO save engine: UniversalMethodFinder initialization failed")
+	finder, global_container = loadstring(UNIVERSAL_METHOD_FINDER_SOURCE, filename)()
 
 	finder({
 		-- readbinarystring = 'string.find(...,"bin",nil,true)', -- ! Could match some unwanted stuff (getbinaryindex)
@@ -325,6 +448,54 @@ do -- * Load Region of Déjà Vu
 			end
 		end
 	end
+
+	-- XELO STRONG HIDDEN-PROPERTY READER
+	-- Some executors (e.g. Potassium) expose gethiddenproperty that can read
+	-- PhysicalConfigData but returns an error for RenderData/CollisionData/
+	-- SurfaceData. Try every known reader so CSG geometry is never lost just
+	-- because one function is partial/stubbed.
+	local strongHiddenReaders = {}
+	do
+		local candidateNames = {
+			"gethiddenproperty", "gethiddenproperty_fallback", "getspecialproperty",
+			"getrawproperty", "getproperty", "getproperties", "getallproperties",
+			"getinstanceproperties", "getpropertyvalue",
+		}
+		local function addReader(fn)
+			if type(fn) == "function" then
+				for _, existing in ipairs(strongHiddenReaders) do
+					if existing == fn then return end
+				end
+				strongHiddenReaders[#strongHiddenReaders + 1] = fn
+			end
+		end
+		for _, name in ipairs(candidateNames) do
+			addReader(global_container[name])
+			addReader(getgenv and getgenv()[name])
+			addReader(_G and _G[name])
+			addReader(shared and shared[name])
+		end
+		addReader(gethiddenproperty)
+		addReader(gethiddenproperty_fallback)
+	end
+
+	local function xelo_strong_gethidden(instance, propertyName)
+		local firstErr
+		for _, reader in ipairs(strongHiddenReaders) do
+			local ok, value = pcall(reader, instance, propertyName)
+			if ok and value ~= nil and value ~= "" then
+				return value
+			end
+			if not ok and firstErr == nil then firstErr = value end
+		end
+		-- Last resort: direct index (some executors expose hidden props here).
+		local ok, value = pcall(function() return instance[propertyName] end)
+		if ok and value ~= nil and value ~= "" then
+			return value
+		end
+		return nil, firstErr
+	end
+
 	local function benchmark(f1, f2, ...)
 		local ranking = table.create(2)
 		for i, f in { f1, f2 } do
@@ -403,6 +574,12 @@ do -- * Load Region of Déjà Vu
 			base64encode = reselim_base64encode
 		end
 
+		-- Fallback if Reselim/Base64.lua cannot be fetched: the pure-Luau encoder
+		-- defined above is sufficient for every string-based call site here.
+		if not base64encode then
+			base64encode = to_base64
+		end
+
 		assert(base64encode, "base64encode not found")
 	end
 
@@ -415,15 +592,47 @@ do -- * Load Region of Déjà Vu
 			end
 		end
 
-		local filename = "RequireOnlineModule"
+		-- Vendored because https://github.com/luau/SomeHub (and its raw files) are now 404.
+		-- Mirrored from: https://github.com/gmh5225/SomeHub-/blob/main/RequireOnlineModule.luau
+		local REQUIRE_ONLINE_MODULE_SOURCE = [==[
+--!optimize 2
+local RequireCache = {} -- Store required ModuleScripts for further use (ModuleScript persistance).
+
+-- Fake Require func
+local function ARequire(ModuleScript)
+	local Cached = RequireCache[ModuleScript]
+	if Cached then -- If module is already loaded, return it.
+		return Cached
+	end
+
+	local Source = ModuleScript.Source
+	local LoadedSource = loadstring(Source)
+	local fenv = getfenv(LoadedSource) -- Fake environment
+
+	fenv.script = ModuleScript -- Set script variable.
+	fenv.require = ARequire -- Overwrite require so it can require other modulescripts and so forth.
+
+	local Output = LoadedSource() -- Execute the module
+
+	RequireCache[ModuleScript] = Output -- Store module in cache for further use.
+
+	return Output -- Return the result to the executor
+end
+
+local function ARequireController(AssetId)
+	local ModuleScript = game:GetObjects("rbxassetid://" .. AssetId)[1]
+
+	return ARequire(ModuleScript)
+end
+
+return ARequireController
+]==]
 
 		-- Credits @boatbomber
 		local hashlib_sha384
 		pcall(function()
-			hashlib_sha384 = loadstring(
-				game:HttpGet("https://raw.githubusercontent.com/luau/SomeHub/main/" .. filename .. ".luau", true),
-				filename
-			)()(4544052033).sha384
+			local ARequire = loadstring(REQUIRE_ONLINE_MODULE_SOURCE, "RequireOnlineModule (embedded)")()
+			hashlib_sha384 = ARequire(4544052033).sha384
 		end)
 
 		-- * Tests if sha384 exists then benchmark it
@@ -435,7 +644,15 @@ do -- * Load Region of Déjà Vu
 			end
 		end
 
-		assert(sha384, "sha384 hash function not found")
+		if not sha384 then
+			-- sha384 is only used as a decompile-cache key. If the executor has no
+			-- hash() and the online HashLib module cannot be loaded, use the bytecode
+			-- itself as the cache key instead of aborting the entire save.
+			warn("[XELO save engine] sha384 unavailable; using bytecode as script-cache key")
+			sha384 = function(data)
+				return data
+			end
+		end
 	end
 end
 
@@ -1331,33 +1548,204 @@ if CLIENT_VERSION < math.huge then -- math.huge because unknown yet
 	XML_Descriptors.Content = XML_Descriptors.ContentId
 end
 
--- Minimal valid CSGPHS v8 collision blobs (placeholder PhysicalConfigData for unions/MeshParts).
--- The real per-union blob needs RobloxSecurity to read, but Studio rebuilds the collision from
--- the mesh data, so we write one that only marks the CollisionFidelity. Keeps unions saved as
--- real, loadable UnionOperations on every executor.
-local PHYSICAL_CONFIG_BASE =
+-- PartOperation.AssetId arrives as a raw number on some clients and as a
+-- "rbxassetid://..." string on others. This descriptor normalizes both and
+-- always emits the modern Content tag, so the union always resolves in Studio.
+XML_Descriptors.XeloAssetId = function(raw)
+	if raw == nil or raw == "" then
+		return "<null></null>", "Content"
+	end
+	local value = tostring(raw)
+	local id = tonumber(value)
+	if id then
+		if id <= 0 or id ~= math.floor(id) then
+			return "<null></null>", "Content"
+		end
+		value = "rbxassetid://" .. tostring(math.floor(id))
+	elseif string.find(value, "rbxassetid://", 1, true) ~= 1 then
+		value = "rbxassetid://" .. value
+	end
+	return "<url>" .. XML_Descriptors.string(value) .. "</url>", "Content"
+end
+
+--[[ XELO UNION FIX (baked into the engine)
+     PartOperation geometry lives in hidden properties. Studio can rebuild a
+     union from PartOperation.AssetId (a PartOperationAsset) as long as we emit
+     it as a Content URL, plus a valid CSGPHS placeholder for PhysicalConfigData.
+     Everything here is idempotent so the main script's runtime patcher can no-op. ]]
+local XELO_UNION_API_INJECTED = true
+
+local function xelo_valid_hidden_value(value)
+	if value == nil or value == "" then
+		return false
+	end
+	if type(value) == "string" then
+		local v = string.lower(value)
+		if string.find(v, "can't get value", 1, true)
+			or string.find(v, "unable to get property", 1, true)
+			or string.find(v, "not scriptable", 1, true) then
+			return false
+		end
+	end
+	return true
+end
+
+local function xelo_read_hidden_property(instance, propertyName)
+	-- Use the strong reader first: it tries gethiddenproperty, getspecialproperty,
+	-- fallback variants and direct index, so a partial executor API cannot hide
+	-- CSG geometry from the save.
+	local value = xelo_strong_gethidden(instance, propertyName)
+	if xelo_valid_hidden_value(value) then
+		return value
+	end
+	if gethiddenproperty then
+		local ok, v = pcall(gethiddenproperty, instance, propertyName)
+		if ok and xelo_valid_hidden_value(v) then
+			return v
+		end
+	end
+	if gethiddenproperty_fallback then
+		local ok, v = pcall(gethiddenproperty_fallback, instance, propertyName)
+		if ok and xelo_valid_hidden_value(v) then
+			return v
+		end
+	end
+	local ok, v = pcall(index, instance, propertyName)
+	if ok and xelo_valid_hidden_value(v) then
+		return v
+	end
+end
+
+local function xelo_union_asset_url(instance)
+	local raw = xelo_read_hidden_property(instance, "AssetId")
+	if raw == nil then
+		return nil
+	end
+	if type(raw) == "string" and string.find(raw, "rbxassetid://", 1, true) == 1 then
+		local id = tonumber(string.match(raw, "%d+"))
+		if id and id > 0 then
+			return "rbxassetid://" .. tostring(math.floor(id))
+		end
+		return nil
+	end
+	local id = tonumber(raw)
+	if not id or id <= 0 or id ~= math.floor(id) then
+		return nil
+	end
+	return "rbxassetid://" .. tostring(math.floor(id))
+end
+
+local function xelo_union_geometry_readable(instance)
+	if xelo_union_asset_url(instance) then
+		return true
+	end
+	-- PhysicalConfigData is intentionally NOT part of this check: it is only a
+	-- collision hull. A union with a readable CSGPHS blob but no AssetId and no
+	-- RenderData still has no visible geometry and must be flattened to a Part.
+	for _, name in ipairs({ "RenderData", "CollisionData", "SurfaceData", "MeshData" }) do
+		local value = xelo_read_hidden_property(instance, name)
+		if typeof and typeof(value) == "SharedString" then
+			return true
+		end
+		-- Geometry blobs are long binary data; short strings are executor
+		-- error placeholders such as "can't get value" or "null".
+		if type(value) == "string" and #value >= 16 then
+			return true
+		end
+	end
+	return false
+end
+
+local XELO_PHYSICAL_CONFIG_BASE =
 	"\67\83\71\80\72\83\8\0\0\0\2\0\40\181\47\253\32\180\149\1\0\120\0\120\32\193\32\65\65\2\12\1\3\2\1\12\193\16\160\112\242\1\176\106\234\58\123\18\99\238\29\229\253\198\101\127\68\150\204\66\96\179\97\185\59\111\222\22\115\2\106"
-local CF = Enum.CollisionFidelity
-
-local PHYSICAL_CONFIG_BY_CF = {
-	[CF.Box] = "\67\83\71\80\72\83\0\0\0\0\66\76\79\67\75", -- "CSGPHS\0\0\0\0BLOCK"
+local XELO_CF = Enum.CollisionFidelity
+local XELO_PHYSICAL_CONFIG_BY_CF = {
+	[XELO_CF.Box] = "\67\83\71\80\72\83\0\0\0\0\66\76\79\67\75",
 }
-
 do
-	local base = PHYSICAL_CONFIG_BASE
+	local base = XELO_PHYSICAL_CONFIG_BASE
 	local prefix = string.sub(base, 1, 10)
 	local suffix = string.sub(base, 12)
-
 	local byteMap = {
-		[CF.Hull] = 1,
-		[CF.Default] = 2,
-		[CF.PreciseConvexDecomposition] = 3,
-		[CF.Tunable] = 7,
+		Hull = 1,
+		Default = 2,
+		PreciseConvexDecomposition = 3,
+		Tunable = 7,
 	}
-
-	for cf, byte in byteMap do
-		PHYSICAL_CONFIG_BY_CF[cf] = prefix .. string.char(byte) .. suffix
+	for name, byte in byteMap do
+		local cf = XELO_CF[name]
+		if cf then
+			XELO_PHYSICAL_CONFIG_BY_CF[cf] = prefix .. string.char(byte) .. suffix
+		end
 	end
+end
+
+local function xelo_inject_union_api_properties(classList)
+	if type(classList) ~= "table" then
+		return classList
+	end
+	local function ensure(className, superclass, propertyTemplates)
+		local entry = classList[className]
+		if not entry then
+			entry = { Properties = {}, Superclass = superclass }
+			classList[className] = entry
+		end
+		entry.Properties = entry.Properties or {}
+		for _, template in ipairs(propertyTemplates) do
+			local found = false
+			for i, existing in ipairs(entry.Properties) do
+				if existing.Name == template.Name then
+					-- Replace the dump's weak definition with the explicit one
+					-- so hidden geometry is always read + serialized correctly.
+					local property = table.clone(template)
+					property.CanRead = nil
+					entry.Properties[i] = property
+					found = true
+					break
+				end
+			end
+			if not found then
+				local property = table.clone(template)
+				property.CanRead = nil
+				table.insert(entry.Properties, property)
+			end
+		end
+	end
+	local sharedTemplates = {
+		{ Name = "RenderData", Category = "Hidden", ValueType = "SharedString", Special = true },
+		{ Name = "CollisionData", Category = "Hidden", ValueType = "SharedString", Special = true },
+		{ Name = "SurfaceData", Category = "Hidden", ValueType = "SharedString", Special = true },
+	}
+	local assetTemplate = {
+		Name = "AssetId",
+		Category = "DataType",
+		ValueType = "XeloAssetId",
+		Special = true,
+		Fallback = function(instance)
+			return xelo_union_asset_url(instance)
+		end,
+	}
+	local physicalTemplate = {
+		Name = "PhysicalConfigData",
+		Category = "Hidden",
+		ValueType = "SharedString",
+		Special = true,
+	}
+	local meshTemplate = { Name = "MeshData", Category = "Hidden", ValueType = "SharedString", Special = true }
+	local function unionTemplates()
+		local result = { assetTemplate, physicalTemplate }
+		for _, template in ipairs(sharedTemplates) do
+			result[#result + 1] = template
+		end
+		return result
+	end
+	pcall(function()
+		-- UnionOperation / IntersectionOperation inherit PartOperation, so one
+		-- injection on the base class covers them without emitting duplicate tags.
+		ensure("PartOperation", "BasePart", unionTemplates())
+		ensure("MeshPart", "TriangleMeshPart", { physicalTemplate, meshTemplate })
+	end)
+	return classList
 end
 
 local ClassList
@@ -1687,7 +2075,9 @@ do
 				end
 			end
 
-			writefile(CLIENT_VERSION_str, API_Dump)
+			if API_Dump then
+				pcall(writefile, CLIENT_VERSION_str, API_Dump)
+			end
 		end)
 
 		if not ok or not API_Dump then
@@ -1824,6 +2214,7 @@ do
 
 		-- classList.Instance.Properties.Parent = nil -- ? Not sure if this is a better option than filtering through properties to remove this
 
+		xelo_inject_union_api_properties(classList)
 		return classList
 	end
 
@@ -1888,11 +2279,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field IgnoreDefaultPlayerScripts boolean -- * **RISKY: Ignores Default PlayerScripts like PlayerModule & RbxCharacterSounds. Prevents crashes on certain Executors. ___Default:___ true
 --- @field IgnoreSharedStrings boolean -- * **RISKY: FIXES CRASHES (TEMPORARY, TESTED ON ROEXEC ONLY). FEEL FREE TO DISABLE THIS TO SEE IF IT WORKS FOR YOU**. ___Default:___ true
 --- @field SharedStringOverwrite boolean -- * **RISKY:** if the process is not finished aka crashed then none of the affected values will be available. SharedStrings can also be used for ValueTypes that aren't `SharedString`, this behavior is not documented anywhere but makes sense (Could create issues though, due to _potential_ ValueType mix-up, only works on certain types which are all base64 encoded so far). Reason: Allows for potential smaller file size (can also be bigger in some cases). ___Default:___ false
---- @field TreatUnionsAsParts boolean -- * **RISKY:** Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible. ___Default:___ false
---- @field IgnoreSounds boolean -- * XELO: Skips every Sound instance during the save (smaller files). ___Default:___ false
---- @field IgnoreParticles boolean -- * XELO: Skips ParticleEmitter / Trail / Beam instances during the save (smaller files). ___Default:___ false
---- @field IgnoreVoice boolean -- * XELO: Skips VoiceChatInternal / VoiceChatService services during the save. ___Default:___ false
---- @field IgnoreChat boolean -- * XELO: Skips Chat / TextChatService services during the save. ___Default:___ false
+--- @field TreatUnionsAsParts boolean -- * **RISKY:** Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible. ___Default:___ false (except Solara)
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -1939,7 +2326,13 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
-	
+	local currentstr, currentsize, totalsize, chunks = "", 0, 0, table.create(1)
+	local savebuffer, savebuffer_size = {}, 1
+	local header =
+	'<!-- Saved by XELO STEALER v6.2 | Made by Xelo -->\n' ..
+	'<!-- Discord: ' .. (DiscordLink or "https://discord.gg/hermeznxelo") .. ' -->\n' ..
+	'<roblox version="4">'
+	local StatusText
 
 	local OPTIONS = {
 		mode = "optimized",
@@ -1968,11 +2361,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreProperties = {},
 
 		IgnoreList = { "CoreGui", "CorePackages" },
-		-- * XELO PANEL TOGGLES (activated from the panel's Settings page):
-		IgnoreSounds = false, -- Skip every Sound instance.
-		IgnoreParticles = false, -- Skip ParticleEmitter / Trail / Beam instances.
-		IgnoreVoice = false, -- Skip VoiceChatInternal / VoiceChatService.
-		IgnoreChat = false, -- Skip Chat / TextChatService.
 
 		ExtraInstances = {},
 		NilInstances = false,
@@ -2023,7 +2411,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		IgnoreSharedStrings = EXECUTOR_NAME ~= "Wave" and true,
 		SharedStringOverwrite = false,
-		TreatUnionsAsParts = false, -- Save every union as a real UnionOperation instead of a plain Part
+		-- Keep unions as real UnionOperation objects. Flattening to Parts loses
+		-- their shape and makes them look "missing" in Studio. Potassium can
+		-- read PhysicalConfigData even when RenderData is blocked, so forcing
+		-- a flatten here destroys geometry that was previously saved fine.
+		TreatUnionsAsParts = EXECUTOR_NAME == "Solara",
+		SaveUnionGeometry = true,
+		PreloadStreamedMap = true,
+		StreamPreloadPoints = 600,
+		-- Keep requested chunks pinned until serialization finishes. A short
+		-- timeout lets early sweep zones stream out again before the save starts.
+		StreamPreloadTimeout = 300,
 		AlternativeWritefile = not ArrayToDict({ "WRD", "Xeno", "Zorara" })[EXECUTOR_NAME],
 
 		OptionsAliases = { -- You can't really modify these as a user
@@ -2173,23 +2571,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
-	if OPTIONS.IgnoreSounds then
-		table.insert(OPTIONS.IgnoreList, "Sound")
-	end
-	if OPTIONS.IgnoreParticles then
-		table.insert(OPTIONS.IgnoreList, "ParticleEmitter")
-		table.insert(OPTIONS.IgnoreList, "Trail")
-		table.insert(OPTIONS.IgnoreList, "Beam")
-	end
-	if OPTIONS.IgnoreVoice then
-		table.insert(OPTIONS.IgnoreList, "VoiceChatInternal")
-		table.insert(OPTIONS.IgnoreList, "VoiceChatService")
-	end
-	if OPTIONS.IgnoreChat then
-		table.insert(OPTIONS.IgnoreList, "Chat")
-		table.insert(OPTIONS.IgnoreList, "TextChatService")
-	end
-
 	local InstancesOverrides = {}
 
 	local DecompileIgnore, IgnoreList, IgnoreProperties, NotCreatableFixes =
@@ -2236,8 +2617,133 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local IgnoreSharedStrings = OPTIONS.IgnoreSharedStrings
 	local SharedStringOverwrite = OPTIONS.SharedStringOverwrite
+	local keepUnionGeometry = OPTIONS.SaveUnionGeometry ~= false
 
-	local ldeccache = GLOBAL_ENV.scriptcache
+	--[[ XELO LARGE-MAP FIX
+	     StreamingEnabled clients only hold the chunks around the character.
+	     Anything streamed out is invisible to GetDescendants(), so a bounding
+	     box seeded only from loaded parts still cuts the map off. Seed from what
+	     is loaded, then expand to a guaranteed minimum span and sweep a capped
+	     grid with RequestStreamAroundAsync before any serialization starts. ]]
+		local function xelo_preload_streamed_map()
+		if OPTIONS.PreloadStreamedMap == false then
+			return 0, "preload disabled"
+		end
+		if GLOBAL_ENV.XELO_MAP_PRELOADED then
+			return 0, "already preloaded by host script"
+		end
+
+		local ws = workspace
+		local okStream, streamingEnabled = pcall(function()
+			return ws.StreamingEnabled == true
+		end)
+		if not okStream or not streamingEnabled then
+			return 0, "streaming off"
+		end
+
+		local canRequest = false
+		pcall(function()
+			if type(ws.RequestStreamAroundAsync) == "function" then
+				ws:RequestStreamAroundAsync(Vector3.new(0, 0, 0), 0)
+				canRequest = true
+			end
+		end)
+
+		local hrp, savedCF, savedAnchored
+		pcall(function()
+			local plr = game:GetService("Players").LocalPlayer
+			hrp = plr and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				savedCF = hrp.CFrame
+				savedAnchored = hrp.Anchored
+			end
+		end)
+		if not canRequest and not hrp then
+			return 0, "no stream preload method available"
+		end
+
+		local teleportY = hrp and hrp.Position.Y or 0
+		local targetRadius = 1000
+		pcall(function() targetRadius = tonumber(ws.StreamingTargetRadius) or 1000 end)
+		targetRadius = math.clamp(targetRadius, 100, 5000)
+
+		local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+		pcall(function()
+			for _, obj in ipairs(ws:GetDescendants()) do
+				if obj:IsA("BasePart") then
+					local p = obj.Position
+					if p.X < minX then minX = p.X end
+					if p.X > maxX then maxX = p.X end
+					if p.Z < minZ then minZ = p.Z end
+					if p.Z > maxZ then maxZ = p.Z end
+				end
+			end
+		end)
+		if hrp then
+			local p = hrp.Position
+			minX = math.min(minX, p.X)
+			maxX = math.max(maxX, p.X)
+			minZ = math.min(minZ, p.Z)
+			maxZ = math.max(maxZ, p.Z)
+		end
+		if minX == math.huge then
+			minX, maxX, minZ, maxZ = 0, 0, 0, 0
+		end
+
+		local span = math.max(targetRadius * 16, 16384)
+		local cx, cz = (minX + maxX) / 2, (minZ + maxZ) / 2
+		minX, maxX = cx - span / 2, cx + span / 2
+		minZ, maxZ = cz - span / 2, cz + span / 2
+
+		local pointCap = tonumber(OPTIONS.StreamPreloadPoints) or 600
+		pointCap = math.clamp(pointCap, 16, 5000)
+		local timeout = tonumber(OPTIONS.StreamPreloadTimeout) or 300
+		timeout = math.clamp(timeout, 0.1, 600)
+		local stepWait = hrp and 0.15 or 0.08
+
+		local step = math.clamp(targetRadius * 0.8, 200, 1200)
+		local nx = math.max(1, math.ceil((maxX - minX) / step) + 1)
+		local nz = math.max(1, math.ceil((maxZ - minZ) / step) + 1)
+		if nx * nz > pointCap then
+			local scale = math.sqrt((nx * nz) / pointCap)
+			step *= scale
+			nx = math.max(1, math.ceil((maxX - minX) / step) + 1)
+			nz = math.max(1, math.ceil((maxZ - minZ) / step) + 1)
+		end
+
+		-- Anchor while sweeping so the character does not fall between zones.
+		if hrp then pcall(function() hrp.Anchored = true end) end
+
+		local count = 0
+		for ix = 0, nx - 1 do
+			for iz = 0, nz - 1 do
+				local px = minX + ix * step
+				local pz = minZ + iz * step
+				if canRequest then
+					pcall(function()
+						ws:RequestStreamAroundAsync(Vector3.new(px, teleportY, pz), timeout)
+					end)
+				end
+				if hrp then
+					pcall(function() hrp.CFrame = CFrame.new(px, teleportY, pz) end)
+				end
+				count += 1
+				task.wait(stepWait)
+			end
+		end
+
+		if hrp and savedCF then
+			pcall(function()
+				hrp.CFrame = savedCF
+				hrp.Anchored = savedAnchored
+			end)
+		end
+		task.wait(1.5)
+
+		GLOBAL_ENV.XELO_MAP_PRELOADED = true
+		return count, ("preloaded %d zones (step %d)"):format(count, math.floor(step))
+	end
+local ldeccache = GLOBAL_ENV.scriptcache
 
 	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNotCreatableWillBeEnabled, RecoveredScripts
 
@@ -2665,7 +3171,16 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 
 		if special then
-			if gethiddenproperty then
+			-- XELO: try every hidden-property reader before giving up. Potassium's
+			-- gethiddenproperty can read PhysicalConfigData but errors on RenderData;
+			-- another reader in the executor may still expose it.
+			local strong = xelo_strong_gethidden(instance, propertyName)
+			if strong ~= nil and not filterPropVal(strong, propertyName, category)
+				and not (type(strong) == "string" and #strong < 8
+					and (string.find(string.lower(strong), "unable", 1, true)
+						or string.find(string.lower(strong), "error", 1, true))) then
+				raw = strong
+			elseif gethiddenproperty then
 				local ok, result = pcall(gethiddenproperty, instance, propertyName)
 
 				if ok then
@@ -2679,8 +3194,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						if __DEBUG_MODE then
 							__DEBUG_MODE("Filtered", propertyName)
 						end
+						-- XELO: do not poison the property globally; hidden properties can
+						-- be readable on one instance and unreadable on the next one.
 						-- Property.Special = false
-						property.CanRead = false
 					end
 
 					return __BREAK -- ? We skip it because even if we use "" it will just reset to default in most cases, unless it's a string tag for example (same as not being defined)
@@ -2870,7 +3386,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						continue -- They won't show up in Studio anyway (Enable SaveNotCreatable if you wish to bypass this)
 					end
 				else -- ! Assuming nothing that is a PartOperation or inherits from it is in NotCreatableFixes
-					if TreatUnionsAsParts and instance:IsA("PartOperation") then
+					if TreatUnionsAsParts and instance:IsA("PartOperation")
+						and not xelo_union_geometry_readable(instance) then
 						ClassName, InstanceOverride = "Part", replaceClassName(instance, InstanceName, ClassName)
 						ClassNameOverride = "BasePart" -- * Mutual Superclass for PartOperation and Part; For properties only
 					elseif not ClassList[ClassName] then -- ? API Dump is outdated then
@@ -2935,11 +3452,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 						local ValueType = Property.ValueType
 
-						if
-							IgnoreSharedStrings
-							and ValueType == "SharedString"
-							and not (PropertyName == "PhysicalConfigData" and instance:IsA("TriangleMeshPart"))
-						then -- ? More info in Options (union/MeshPart physical config is kept so unions still save as real, visible unions)
+						local isUnionGeometry = keepUnionGeometry
+							and instance:IsA("PartOperation")
+							and (
+								PropertyName == "RenderData"
+								or PropertyName == "CollisionData"
+								or PropertyName == "SurfaceData"
+								or PropertyName == "PhysicalConfigData"
+							)
+						local isPhysicalConfig = PropertyName == "PhysicalConfigData" and instance:IsA("TriangleMeshPart")
+						if IgnoreSharedStrings and ValueType == "SharedString"
+							and not isUnionGeometry and not isPhysicalConfig then -- ? More info in Options
 							continue
 						end
 
@@ -2956,18 +3479,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						-- end
 						local Category, Optional = Property.Category, Property.Optional
 
-						local raw
+						local raw = ReadProperty(instance, Property, PropertyName, Special, Category, Optional)
 
-						if PropertyName == "PhysicalConfigData" and instance:IsA("TriangleMeshPart") then
-							-- Physical config requires RobloxSecurity to read, but Studio rebuilds the
-							-- collision from the mesh data, so a matching placeholder per CollisionFidelity
-							-- is written instead. This keeps unions saved as real, loadable UnionOperations.
-							raw = PHYSICAL_CONFIG_BY_CF[instance.CollisionFidelity]
-							if raw == nil then
-								raw = PHYSICAL_CONFIG_BY_CF[Enum.CollisionFidelity.Default]
-							end
-						else
-							raw = ReadProperty(instance, Property, PropertyName, Special, Category, Optional)
+						-- Real PhysicalConfigData is almost always unreadable outside
+						-- Studio. Fall back to a minimal CSGPHS blob matching the part's
+						-- CollisionFidelity so the union/MeshPart stays loadable and
+						-- visible; Studio rebuilds the actual collision from mesh data.
+						if PropertyName == "PhysicalConfigData" and instance:IsA("TriangleMeshPart")
+							and XELO_PHYSICAL_CONFIG_BY_CF
+							and (raw == __BREAK or raw == nil or raw == "") then
+							raw = XELO_PHYSICAL_CONFIG_BY_CF[instance.CollisionFidelity]
+								or XELO_PHYSICAL_CONFIG_BY_CF[Enum.CollisionFidelity.Default]
 						end
 
 						if raw == __BREAK then -- ! Assuming __BREAK is always returned when there's a failure to read a property
@@ -3054,21 +3576,13 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 								tag = ValueType
 
 								if PropertyName == "Source" then
-									local preserveXeloAISource = false
-									pcall(function()
-										preserveXeloAISource = instance:GetAttribute("XELO_AI_GENERATED") == true
-									end)
-
-									if preserveXeloAISource then
-										local sourceOk, sourceValue = pcall(function() return instance.Source end)
-										value = sourceOk and sourceValue or ""
-									elseif DecompileIgnoring then -- ? Should this really prevent extraction of the original source if present ?
+									if DecompileIgnoring then -- ? Should this really prevent extraction of the original source if present ?
 										if DecompileIgnoring == 1 then
 											DecompileIgnoring = nil
 										end
-										value = "-- THE GAME WAS STEALED BY XELO STEALER V6.4\n" ..
+										value = "-- THE GAME WAS STEALED BY XELO STEALER V6.2\n" ..
         "-- JOIN THE DISCORD SERVER TO COPY ANY GAMES\n" ..
-        "-- https://discord.gg/F9pywQsePr\n\n"
+        "-- https://discord.gg/hermeznxelo\n\n"
 									else
 										local should_decompile = true
 										local LinkedSource
@@ -3148,6 +3662,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 											end
 										end
 
+										value = "-- Saved by XELO STEALER v6.2\n" ..
+       "-- Stealed & Decompiled by Xelo\n" ..
+       "-- Join for more uncopylocked games: " .. (DiscordLink or "https://discord.gg/hermeznxelo") .. "\n\n" ..
+       (hasLinkedSource and "-- Original Source: https://assetdelivery.roblox.com/v1/asset/?" .. (LinkedSource_type or "id") .. "=" .. (LinkedSource or LinkedSource_Url) .. "\n\n" or "")
+       .. value
 									end
 								end
 								value = XML_Descriptors.__PROTECTEDSTRING(value)
@@ -3215,6 +3734,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local function save_game()
+		pcall(xelo_preload_streamed_map)
 		do
 			if IsModel then
 				--[[ 
@@ -3234,1189 +3754,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			or IsolatePlayers
 			or NilInstances and global_container.getnilinstances -- ! Make sure this accurately reflects everything below
 
-		-- FAKE INSTANCES: inject realistic-looking scripts and objects into save output across ALL services
+		-- Fake-instance injection DISABLED: exported places contain only the real
+		-- instances from the game plus files regenerated in this session.
 		local _fakeAll = {}
-		local function _addFake(className, scriptName, scriptSource, parent)
-			pcall(function()
-				local s = Instance.new(className)
-				s.Name = scriptName
-				s.Archivable = true
-				if scriptSource then s.Source = scriptSource end
-				s.Parent = parent
-				if scriptSource then
-					InstancesOverrides[s] = {__SaveSpecific = true, Properties = {Name = scriptName, Source = scriptSource}}
-				end
-				table.insert(_fakeAll, s)
-			end)
-		end
-
-		----------------------------------------------------------------
-		-- SERVERSCRIPTSERVICE (Scripts & ModuleScripts)
-		----------------------------------------------------------------
-		local _SSS = service.ServerScriptService
-
-		local function _scanGameArchitecture(root)
-			local profile = {
-				services = {},
-				mechanics = {},
-				systems = {},
-				remotes = {},
-			}
-
-			local function tag(t, key)
-				if key and key ~= "" then
-					t[key] = true
-				end
-			end
-
-			local function lower(name)
-				return type(name) == "string" and string.lower(name) or ""
-			end
-
-			for _, serviceName in ipairs({
-				"Players",
-				"DataStoreService",
-				"MarketplaceService",
-				"Teams",
-				"ReplicatedStorage",
-				"ServerScriptService",
-				"Workspace",
-				"Lighting",
-				"TextChatService",
-				"RunService",
-			}) do
-				if root:FindFirstChild(serviceName) then
-					tag(profile.services, serviceName)
-				end
-			end
-
-			for _, instance in ipairs(root:GetDescendants()) do
-				local name = lower(instance.Name)
-				if instance:IsA("Script") or instance:IsA("LocalScript") or instance:IsA("ModuleScript") then
-					tag(profile.systems, "scripted")
-					if name:find("combat") or name:find("damage") or name:find("weapon") or name:find("enemy") then
-						tag(profile.mechanics, "combat")
-					end
-					if name:find("shop") or name:find("market") or name:find("currency") or name:find("coins") then
-						tag(profile.mechanics, "economy")
-					end
-					if name:find("quest") or name:find("mission") or name:find("objective") then
-						tag(profile.mechanics, "quests")
-					end
-					if name:find("spawn") or name:find("respawn") or name:find("map") then
-						tag(profile.mechanics, "spawn")
-					end
-					if name:find("team") or name:find("clan") or name:find("guild") then
-						tag(profile.mechanics, "teams")
-					end
-					if name:find("escape") or name:find("keyboard") or name:find("code") or name:find("puzzle") then
-						tag(profile.mechanics, "keyboard")
-					end
-					if name:find("ui") or name:find("hud") or name:find("menu") or name:find("gui") then
-						tag(profile.mechanics, "ui")
-					end
-					if name:find("weather") or name:find("day") or name:find("night") then
-						tag(profile.mechanics, "world-cycle")
-					end
-				end
-				if instance:IsA("RemoteEvent") or instance:IsA("RemoteFunction") then
-					table.insert(profile.remotes, name)
-					tag(profile.systems, "remoteBridge")
-					if name:find("keyboard") or name:find("puzzle") or name:find("escape") then
-						tag(profile.mechanics, "keyboard")
-					end
-				end
-				if instance:IsA("ValueBase") then
-					if name:find("leaderstat") or name:find("currency") or name:find("score") or name:find("xp") then
-						tag(profile.mechanics, "progression")
-					end
-				end
-				if instance:IsA("Folder") and name:find("leaderstats") then
-					tag(profile.mechanics, "progression")
-				end
-			end
-
-			if profile.services.DataStoreService or profile.mechanics.economy or profile.mechanics.progression then
-				tag(profile.systems, "playerProgression")
-			end
-			if profile.services.Teams or profile.mechanics.teams then
-				tag(profile.systems, "teamLogic")
-			end
-			if profile.mechanics.combat or profile.mechanics.spawn then
-				tag(profile.systems, "gameplayLoop")
-			end
-			if profile.mechanics.keyboard then
-				tag(profile.systems, "inputLogic")
-			end
-			if profile.mechanics.ui then
-				tag(profile.systems, "uiSupport")
-			end
-			if profile.services.Lighting or profile.mechanics["world-cycle"] then
-				tag(profile.systems, "environment")
-			end
-
-			return profile
-		end
-
-		local function _buildServerReconstructionPlan(profile)
-			local generated = {}
-			local function add(className, scriptName, source)
-				if type(scriptName) ~= "string" or scriptName == "" then
-					return
-				end
-				table.insert(generated, {className = className or "Script", scriptName = scriptName, source = source or ""})
-			end
-
-			if profile.systems.playerProgression and profile.services.DataStoreService then
-				add("Script", "EconomyRuntime", [[local Players = game:GetService("Players")
-local DataStoreService = game:GetService("DataStoreService")
-local store = DataStoreService:GetDataStore("PlayerProfile")
-local cache = {}
-
-local function ensureLeaderstats(player)
-	local leaderstats = player:FindFirstChild("leaderstats")
-	if not leaderstats then
-		leaderstats = Instance.new("Folder")
-		leaderstats.Name = "leaderstats"
-		leaderstats.Parent = player
-	end
-	for _, statName in ipairs({"Coins", "Level", "XP"}) do
-		local stat = leaderstats:FindFirstChild(statName)
-		if not stat then
-			stat = Instance.new("IntValue")
-			stat.Name = statName
-			stat.Value = 0
-			stat.Parent = leaderstats
-		end
-	end
-end
-
-local function savePlayer(player)
-	local profile = cache[player.UserId]
-	if not profile then return end
-	pcall(function()
-		store:SetAsync(tostring(player.UserId), profile)
-	end)
-end
-
-local function loadPlayer(player)
-	ensureLeaderstats(player)
-	local key = tostring(player.UserId)
-	local ok, data = pcall(function()
-		return store:GetAsync(key)
-	end)
-	local profile = ok and type(data) == "table" and data or {Coins = 0, Level = 1, XP = 0}
-	cache[player.UserId] = profile
-	local leaderstats = player:FindFirstChild("leaderstats")
-	if leaderstats then
-		leaderstats.Coins.Value = profile.Coins or 0
-		leaderstats.Level.Value = profile.Level or 1
-		leaderstats.XP.Value = profile.XP or 0
-	end
-end
-
-Players.PlayerAdded:Connect(loadPlayer)
-Players.PlayerRemoving:Connect(function(player)
-	savePlayer(player)
-	cache[player.UserId] = nil
-end)
-
-return true]])
-			end
-
-			if profile.mechanics.combat then
-				add("Script", "CombatRuntime", [[local Players = game:GetService("Players")
-local CombatRuntime = {}
-local cooldowns = {}
-
-function CombatRuntime:CanAttack(player)
-	local last = cooldowns[player.UserId] or 0
-	if tick() - last < 0.7 then
-		return false
-	end
-	cooldowns[player.UserId] = tick()
-	return true
-end
-
-function CombatRuntime:ResolveDamage(attacker, victim, amount)
-	if not self:CanAttack(attacker) then
-		return false
-	end
-	local humanoid = victim and victim:FindFirstChildOfClass("Humanoid")
-	if humanoid then
-		humanoid:TakeDamage(amount or 20)
-		return true
-	end
-	return false
-end
-
-Players.PlayerRemoving:Connect(function(player)
-	cooldowns[player.UserId] = nil
-end)
-
-return CombatRuntime]])
-			end
-
-			if profile.mechanics.quests then
-				add("Script", "QuestRuntime", [[local Players = game:GetService("Players")
-local QuestRuntime = {}
-local activeQuests = {}
-
-function QuestRuntime:Assign(player, name)
-	activeQuests[player.UserId] = activeQuests[player.UserId] or {}
-	activeQuests[player.UserId][name] = {progress = 0, required = 1, complete = false}
-	return true
-end
-
-function QuestRuntime:Advance(player, name, amount)
-	local quest = activeQuests[player.UserId] and activeQuests[player.UserId][name]
-	if not quest or quest.complete then
-		return false
-	end
-	quest.progress = quest.progress + (amount or 1)
-	if quest.progress >= quest.required then
-		quest.complete = true
-		return true
-	end
-	return false
-end
-
-Players.PlayerRemoving:Connect(function(player)
-	activeQuests[player.UserId] = nil
-end)
-
-return QuestRuntime]])
-			end
-
-			if profile.systems.environment then
-				add("Script", "EnvironmentRuntime", [[local Lighting = game:GetService("Lighting")
-local EnvironmentRuntime = {time = Lighting.ClockTime or 12}
-
-function EnvironmentRuntime:Tick()
-	self.time = (self.time + 0.1) % 24
-	Lighting.ClockTime = self.time
-end
-
-task.spawn(function()
-	while true do
-		EnvironmentRuntime:Tick()
-		task.wait(10)
-	end
-end)
-
-return EnvironmentRuntime]])
-			end
-
-			if profile.mechanics.keyboard or profile.systems.inputLogic then
-				add("Script", "KeyboardEscapeRuntime", [[local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local KeyboardEscapeRuntime = {}
-local sessions = {}
-
-local function ensureRemote(name)
-	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-	if not remotes then
-		remotes = Instance.new("Folder")
-		remotes.Name = "Remotes"
-		remotes.Parent = ReplicatedStorage
-	end
-	local remote = remotes:FindFirstChild(name)
-	if not remote then
-		remote = Instance.new("RemoteEvent")
-		remote.Name = name
-		remote.Parent = remotes
-	end
-	return remote
-end
-
-local function sendState(player)
-	local state = sessions[player.UserId]
-	if not state then return end
-	ensureRemote("PuzzleState"):FireClient(player, {
-		locked = state.locked,
-		buffer = state.buffer,
-		hint = state.hint,
-		attempts = state.attempts,
-	})
-end
-
-function KeyboardEscapeRuntime:NewSession(player)
-	sessions[player.UserId] = {buffer = "", attempts = 0, locked = true, code = "4821", hint = "Enter code."}
-	sendState(player)
-end
-
-function KeyboardEscapeRuntime:Handle(player, key)
-	local state = sessions[player.UserId]
-	if not state then
-		self:NewSession(player)
-		state = sessions[player.UserId]
-	end
-	if key == "Backspace" then
-		state.buffer = state.buffer:sub(1, -2)
-	elseif key == "Clear" then
-		state.buffer = ""
-	elseif key == "Enter" then
-		if state.buffer == state.code then
-			state.locked = false
-			state.hint = "Unlocked."
-			ensureRemote("EscapeStatus"):FireClient(player, {success = true, message = "Unlocked"})
-		else
-			state.attempts = state.attempts + 1
-			state.hint = "Incorrect code."
-			ensureRemote("EscapeStatus"):FireClient(player, {success = false, message = "Incorrect"})
-		end
-		state.buffer = ""
-	else
-		if #state.buffer < 8 then
-			state.buffer = state.buffer .. tostring(key)
-		end
-	end
-	sendState(player)
-end
-
-Players.PlayerAdded:Connect(function(player)
-	KeyboardEscapeRuntime:NewSession(player)
-	local remote = ensureRemote("KeyboardInput")
-	remote.OnServerEvent:Connect(function(sender, key)
-		if sender == player then
-			KeyboardEscapeRuntime:Handle(player, key)
-		end
-	end)
-end)
-
-return KeyboardEscapeRuntime]])
-			end
-
-			if profile.systems.remoteBridge or #profile.remotes > 0 then
-				add("Script", "RemoteBridgeBootstrap", [[local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
-if not Remotes then
-	Remotes = Instance.new("Folder")
-	Remotes.Name = "Remotes"
-	Remotes.Parent = ReplicatedStorage
-end
-for _, name in ipairs({"ClientToServer", "ServerToClient", "GameState", "InventoryUpdate", "MissionUpdate", "LeaderboardRefresh", "KeyboardInput", "KeypadSubmit", "PuzzleState", "EscapeStatus", "ResetPuzzle"}) do
-	if not Remotes:FindFirstChild(name) then
-		local remote = Instance.new("RemoteEvent")
-		remote.Name = name
-		remote.Parent = Remotes
-	end
-end
-return true]])
-			end
-
-			if profile.mechanics.ui then
-				add("ModuleScript", "UIBridge", [[local UIBridge = {}
-function UIBridge:Show(gui) if gui then gui.Visible = true end return gui end
-function UIBridge:Hide(gui) if gui then gui.Visible = false end return gui end
-return UIBridge]])
-			end
-
-			if #generated > 0 then
-				add("Script", "GameRuntimeCoordinator", [[local Players = game:GetService("Players")
-local GameRuntimeCoordinator = {}
-local booted = false
-function GameRuntimeCoordinator:Startup()
-	if booted then return end
-	booted = true
-end
-GameRuntimeCoordinator:Startup()
-return GameRuntimeCoordinator]])
-			end
-
-			return generated
-		end
-
-		local _serverProfile = _scanGameArchitecture(game)
-		local _serverPlan = _buildServerReconstructionPlan(_serverProfile)
-		for _, entry in ipairs(_serverPlan) do
-			_addFake(entry.className, entry.scriptName, entry.source, _SSS)
-		end
-
-		----------------------------------------------------------------
-		-- SERVERSTORAGE (ModuleScripts - data/config)
-		----------------------------------------------------------------
-		local _SrvS = service.ServerStorage
-
-		_addFake("ModuleScript", "WeaponData", [==[-- WeaponData
-local WeaponData = {}
-WeaponData.Database = {
-	Sword = {damage=25, speed=0.5, range=8, tier=1, material="Iron"},
-	Axe = {damage=35, speed=0.8, range=6, tier=2, material="Steel"},
-	Hammer = {damage=50, speed=1.2, range=5, tier=3, material="Titanium"},
-	Bow = {damage=20, speed=0.3, range=50, tier=2, material="Wood"},
-	Dagger = {damage=15, speed=0.2, range=4, tier=1, material="Iron"},
-	Staff = {damage=40, speed=0.6, range=30, tier=3, material="Crystal"},
-	Shield = {defense=30, blockChance=0.3, tier=2, material="Steel"},
-}
-WeaponData.Enchantments = {
-	Fire = {damageBonus=10, effect="Burn"},
-	Ice = {damageBonus=8, effect="Slow"},
-	Lightning = {damageBonus=12, effect="Stun"},
-	Poison = {damageBonus=6, effect="Poison"},
-	Holy = {damageBonus=15, effect="Smite"},
-}
-return WeaponData]==], _SrvS)
-
-		_addFake("ModuleScript", "ItemDatabase", [==[-- ItemDatabase
-local ItemDatabase = {}
-ItemDatabase.Items = {
-	GreenGoo = {type="Material", rarity="Common", stackable=true, maxStack=99},
-	SlimeCore = {type="Material", rarity="Uncommon", stackable=true, maxStack=50},
-	Bone = {type="Material", rarity="Common", stackable=true, maxStack=99},
-	GoldCoin = {type="Currency", rarity="Common", stackable=true, maxStack=99999},
-	Diamond = {type="Gem", rarity="Legendary", stackable=true, maxStack=99},
-	IronOre = {type="Material", rarity="Common", stackable=true, maxStack=99},
-	HealthPotion = {type="Consumable", rarity="Common", stackable=true, maxStack=20, effect={type="Heal", amount=50}},
-	ManaPotion = {type="Consumable", rarity="Common", stackable=true, maxStack=20, effect={type="RestoreMana", amount=30}},
-	Bomb = {type="Consumable", rarity="Uncommon", stackable=true, maxStack=10, effect={type="Damage", radius=10, damage=75}},
-	TeleportStone = {type="Consumable", rarity="Rare", stackable=true, maxStack=5, effect={type="Teleport", target="Spawn"}},
-}
-function ItemDatabase:GetItem(name) return ItemDatabase.Items[name] end
-function ItemDatabase:GetByType(itemType)
-	local result = {}
-	for name, data in pairs(ItemDatabase.Items) do if data.type == itemType then result[name] = data end end
-	return result
-end
-return ItemDatabase]==], _SrvS)
-
-		_addFake("ModuleScript", "QuestData", [==[-- QuestData
-local QuestData = {}
-QuestData.Quests = {
-	KillSlimes = {type="Kill", name="Slime Infestation", target="Slime", count=10, reward={Coins=200, XP=100}, prereq=nil},
-	GatherIron = {type="Gather", name="Iron Collection", target="IronOre", count=20, reward={Coins=300, XP=150}, prereq=nil},
-	ExploreCave = {type="Explore", name="Dark Cave", target="Cave", count=1, reward={Coins=500, XP=300}, prereq="KillSlimes"},
-	KillDragon = {type="Boss", name="Dragon Slayer", target="Dragon", count=1, reward={Coins=5000, XP=2000}, prereq="ExploreCave"},
-	DefendVillage = {type="Escort", name="Village Defense", target="Village", count=3, reward={Coins=800, XP=500}, prereq=nil},
-	CraftSword = {type="Craft", name="Bladesmith", target="IronSword", count=5, reward={Coins=400, XP=200}, prereq="GatherIron"},
-}
-function QuestData:GetQuest(questId) return QuestData.Quests[questId] end
-function QuestData:GetByType(questType)
-	local result = {}
-	for id, q in pairs(QuestData.Quests) do if q.type == questType then result[id] = q end end
-	return result
-end
-return QuestData]==], _SrvS)
-
-		_addFake("ModuleScript", "GameConfig", [==[-- GameConfig
-local GameConfig = {}
-GameConfig.General = {GameTitle="Adventure World", MaxPlayers=30, Version="2.4.1", MinAge=8}
-GameConfig.Economy = {StartCoins=100, DailyBonus=50, WinBonus=100, LossBonus=10}
-GameConfig.Combat = {PVPEnabled=false, FriendlyFire=false, RespawnTime=5, InvincibilityFrames=1}
-GameConfig.Social = {MaxFriends=100, MaxGuildSize=20, TradeEnabled=true, ChatEnabled=true}
-GameConfig.Performance = {TargetFPS=60, MaxInstances=10000, LODDistance=500, StreamDistance=1000}
-GameConfig.Events = {HalloweenMultiplier=2, ChristmasEvent=true, EasterEggs=true}
-return GameConfig]==], _SrvS)
-
-		----------------------------------------------------------------
-		-- REPLICATEDSTORAGE (ModuleScripts - shared utilities)
-		----------------------------------------------------------------
-		local _RS = service.ReplicatedStorage
-
-		_addFake("ModuleScript", "Constants", [==[-- Constants
-local Constants = {}
-Constants.MAX_PLAYERS = 30
-Constants.RESPAWN_TIME = 5
-Constants.TICK_RATE = 20
-Constants.CURRENCY_PRIMARY = "Coins"
-Constants.CURRENCY_SECONDARY = "Gems"
-Constants.CURRENCY_PREMIUM = "Tokens"
-Constants.RARITY_ORDER = {Common=1, Uncommon=2, Rare=3, Epic=4, Legendary=5, Mythic=6}
-Constants.ITEM_TYPES = {"Weapon","Armor","Consumable","Material","Gem","Cosmetic","Quest"}
-Constants.CHAT_FILTER_LEVEL = 2
-Constants.MAX_INVENTORY_SIZE = 100
-Constants.MAX_EQUIPMENT_SLOTS = 12
-Constants.DAILY_QUEST_LIMIT = 5
-Constants.AFK_TIMEOUT = 300
-Constants.VERSION = "2.4.1"
-return Constants]==], _RS)
-
-		_addFake("ModuleScript", "StringUtils", [==[-- StringUtils
-local StringUtils = {}
-function StringUtils:Trim(s) return string.match(s, "^%s*(.-)%s*$") end
-function StringUtils:Split(s, sep) return string.split(s, sep or ",") end
-function StringUtils:Contains(s, sub) return string.find(s, sub, 1, true) ~= nil end
-function StringUtils:StartsWith(s, prefix) return string.sub(s, 1, #prefix) == prefix end
-function StringUtils:EndsWith(s, suffix) return string.sub(s, -#suffix) == suffix end
-function StringUtils:PadLeft(s, len, char) return string.rep(char or " ", math.max(0, len - #s)) .. s end
-function.StringUtils:PadRight(s, len, char) return s .. string.rep(char or " ", math.max(0, len - #s)) end
-function StringUtils:FormatNumber(n)
-	if n >= 1000000 then return string.format("%.1fM", n/1000000)
-	elseif n >= 1000 then return string.format("%.1fK", n/1000)
-	end
-	return tostring(n)
-end
-function StringUtils:RandomString(length)
-	local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	local result = ""
-	for i = 1, length do local r = math.random(1, #chars) result = result .. string.sub(chars, r, r) end
-	return result
-end
-return StringUtils]==], _RS)
-
-		_addFake("ModuleScript", "MathUtils", [==[-- MathUtils
-local MathUtils = {}
-function MathUtils:Clamp(val, min, max) return math.max(min, math.min(max, val)) end
-function MathUtils:Lerp(a, b, t) return a + (b - a) * self:Clamp(t, 0, 1) end
-function MathUtils:Remap(val, inMin, inMax, outMin, outMax)
-	return outMin + (val - inMin) * (outMax - outMin) / (inMax - inMin)
-end
-function MathUtils:RandomRange(min, max) return min + math.random() * (max - min) end
-function MathUtils:RandomInt(min, max) return math.random(min, max) end
-function MathUtils:Distance(a, b) return (a - b).Magnitude end
-function MathUtils:RoundTo(val, decimals) local p = 10 ^ (decimals or 0) return math.floor(val * p + 0.5) / p end
-function MathUtils:WeightedRandom(weights)
-	local total = 0
-	for _, w in ipairs(weights) do total += w end
-	local r = math.random() * total
-	local cumulative = 0
-	for i, w in ipairs(weights) do
-		cumulative += w
-		if r <= cumulative then return i end
-	end
-	return #weights
-end
-return MathUtils]==], _RS)
-
-		_addFake("ModuleScript", "TableUtils", [==[-- TableUtils
-local TableUtils = {}
-function TableUtils:ShallowCopy(t) local c = {} for k,v in pairs(t) do c[k] = v end return c end
-function TableUtils:DeepCopy(t)
-	local c = {}
-	for k,v in pairs(t) do c[k] = type(v) == "table" and self:DeepCopy(v) or v end
-	return c
-end
-function TableUtils:Find(t, val)
-	for i, v in ipairs(t) do if v == val then return i end end
-	return nil
-end
-function TableUtils:Contains(t, val) return self:Find(t, val) ~= nil end
-function TableUtils:RemoveValue(t, val) local i = self:Find(t, val) if i then table.remove(t, i) return true end return false end
-function TableUtils:Merge(a, b) local c = self:ShallowCopy(a) for k,v in pairs(b) do c[k] = v end return c end
-function TableUtils:Keys(t) local keys = {} for k in pairs(t) do table.insert(keys, k) end return keys end
-function TableUtils:Values(t) local vals = {} for _,v in pairs(t) do table.insert(vals, v) end return vals end
-function TableUtils:Length(t) local count = 0 for _ in pairs(t) do count += 1 end return count end
-function TableUtils:Filter(t, fn) local r = {} for _,v in ipairs(t) do if fn(v) then table.insert(r, v) end end return r end
-function TableUtils:Map(t, fn) local r = {} for i,v in ipairs(t) do r[i] = fn(v) end return r end
-return TableUtils]==], _RS)
-
-		_addFake("ModuleScript", "Signal", [==[-- Signal (event system)
-local Signal = {}
-Signal.__index = Signal
-function Signal.new()
-	return setmetatable({_connections = {}, _handlers = {}}, Signal)
-end
-function Signal:Connect(fn)
-	local connection = {fn = fn, connected = true}
-	table.insert(self._connections, connection)
-	return {
-		Disconnect = function()
-			connection.connected = false
-			for i, c in ipairs(self._connections) do
-				if c == connection then table.remove(self._connections, i) break end
-			end
-		end,
-	}
-end
-function Signal:Fire(...)
-	for _, conn in ipairs(self._connections) do
-		if conn.connected then pcall(conn.fn, ...) end
-	end
-end
-function Signal:Wait()
-	local thread = coroutine.running()
-	local conn
-	conn = self:Connect(function(...)
-		conn:Disconnect()
-		coroutine.resume(thread, ...)
-	end)
-	return coroutine.yield()
-end
-function Signal:Destroy()
-	self._connections = {}
-end
-return Signal]==], _RS)
-
-		_addFake("ModuleScript", "ItemConfig", [==[-- ItemConfig
-local ItemConfig = {}
-ItemConfig.Rarities = {
-	Common = {color=Color3.fromRGB(200,200,200), dropChance=0.5},
-	Uncommon = {color=Color3.fromRGB(30,200,30), dropChance=0.3},
-	Rare = {color=Color3.fromRGB(30,100,255), dropChance=0.15},
-	Epic = {color=Color3.fromRGB(163,53,238), dropChance=0.04},
-	Legendary = {color=Color3.fromRGB(255,165,0), dropChance=0.009},
-	Mythic = {color=Color3.fromRGB(255,50,50), dropChance=0.001},
-}
-ItemConfig.EquipmentSlots = {"Head","Chest","Legs","Feet","MainHand","OffHand","Back","Ring1","Ring2","Necklace","Earring1","Earring2"}
-ItemConfig.ConsumableEffects = {
-	Heal = function(player, amount) local h = player.Character and player.Character:FindFirstChildOfClass("Humanoid") if h then h.Health = math.min(h.Health + amount, h.MaxHealth) end end,
-	RestoreMana = function(player, amount) end,
-	Buff = function(player, stat, amount, duration) end,
-	Teleport = function(player, location) end,
-}
-return ItemConfig]==], _RS)
-
-		----------------------------------------------------------------
-		-- STARTERPLAYER > StarterPlayerScripts (LocalScripts)
-		----------------------------------------------------------------
-		local _SPS = service.StarterPlayer:FindFirstChild("StarterPlayerScripts")
-		if not _SPS then
-			_SPS = Instance.new("Folder")
-			_SPS.Name = "StarterPlayerScripts"
-			_SPS.Parent = service.StarterPlayer
-		end
-
-		_addFake("LocalScript", "ClientController", [==[-- ClientController
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ClientController = {}
-local LocalPlayer = Players.LocalPlayer
-local camera = workspace.CurrentCamera
-ClientController.settings = {Volume=0.8, Sensitivity=1.0, Graphics="High", AutoRun=false}
-function ClientController:Init()
-	print("[ClientController] Initialized for " .. LocalPlayer.Name)
-end
-function ClientController:GetRemote(name)
-	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-	return remotes and remotes:FindFirstChild(name)
-end
-function ClientController:FireServer(name, ...)
-	local remote = self:GetRemote(name)
-	if remote then remote:FireServer(...) end
-end
-function ClientController:RequestServer(name, ...)
-	local remote = self:GetRemote(name)
-	if remote then return remote:InvokeServer(...) end
-	return nil
-end
-ClientController:Init()
-return ClientController]==], _SPS)
-
-		_addFake("LocalScript", "UIHandler", [==[-- UIHandler
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local UIHandler = {}
-local LocalPlayer = Players.LocalPlayer
-local playerGui = LocalPlayer:WaitForChild("PlayerGui")
-local activeFrames = {}
-function UIHandler:Open(name)
-	local frame = playerGui:FindFirstChild("MainGui") and playerGui.MainGui:FindFirstChild(name)
-	if frame then
-		frame.Visible = true
-		TweenService:Create(frame, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency=0}):Play()
-		activeFrames[name] = frame
-	end
-end
-function UIHandler:Close(name)
-	local frame = activeFrames[name]
-	if frame then
-		TweenService:Create(frame, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {BackgroundTransparency=1}):Play()
-		task.delay(0.2, function() frame.Visible = false end)
-		activeFrames[name] = nil
-	end
-end
-function UIHandler:CloseAll()
-	for name in pairs(activeFrames) do self:Close(name) end
-end
-function UIHandler:ShowNotification(title, text, duration)
-	local notif = playerGui:FindFirstChild("NotificationTemplate")
-	if notif then
-		local clone = notif:Clone()
-		clone.Title.Text = title
-		clone.Text.Text = text
-		clone.Parent = playerGui
-		clone.Visible = true
-		TweenService:Create(clone, TweenInfo.new(0.3), {Position = UDim2.new(1, 0, 0.1, 0)}):Play()
-		task.delay(duration or 3, function()
-			TweenService:Create(clone, TweenInfo.new(0.3), {Position = UDim2.new(1.2, 0, 0.1, 0)}):Play()
-			task.delay(0.3, function() clone:Destroy() end)
-		end)
-	end
-end
-return UIHandler]==], _SPS)
-
-		_addFake("LocalScript", "InputManager", [==[-- InputManager
-local UserInputService = game:GetService("UserInputService")
-local ContextActionService = game:GetService("ContextActionService")
-local Players = game:GetService("Players")
-local InputManager = {}
-local bindings = {}
-local inputQueue = {}
-local function processInput(input, gameProcessed)
-	if gameProcessed then return end
-	table.insert(inputQueue, {input=input, time=tick()})
-	for action, binding in pairs(bindings) do
-		if binding.keyCode and input.KeyCode == binding.keyCode then
-			pcall(binding.callback, action, input.UserInputState)
-		end
-		if binding.mouseButton and input.UserInputType == binding.mouseButton then
-			pcall(binding.callback, action, input.UserInputState)
-		end
-	end
-end
-function InputManager:Bind(action, keyCode, callback)
-	bindings[action] = {keyCode=keyCode, callback=callback}
-end
-function InputManager:BindMouse(action, mouseButton, callback)
-	bindings[action] = {mouseButton=mouseButton, callback=callback}
-end
-function InputManager:Unbind(action) bindings[action] = nil end
-function InputManager:IsKeyDown(keyCode) return UserInputService:IsKeyDown(keyCode) end
-function InputManager:GetMousePosition() return UserInputService:GetMouseLocation() end
-UserInputService.InputBegan:Connect(processInput)
-InputManager:Bind("Jump", Enum.KeyCode.Space, function(a, s) end)
-InputManager:Bind("Sprint", Enum.KeyCode.LeftShift, function(a, s) end)
-InputManager:Bind("Inventory", Enum.KeyCode.E, function(a, s) end)
-InputManager:Bind("Map", Enum.KeyCode.M, function(a, s) end)
-return InputManager]==], _SPS)
-
-		_addFake("LocalScript", "AudioManager", [==[-- AudioManager
-local SoundService = game:GetService("SoundService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Players = game:GetService("Players")
-local AudioManager = {}
-local sounds = {}
-local musicTracks = {}
-local currentMusic = nil
-local masterVolume = 0.8
-local musicVolume = 0.5
-local sfxVolume = 0.7
-function AudioManager:Register(name, soundObject)
-	sounds[name] = soundObject
-end
-function AudioManager:Play(name, volume, pitch)
-	local s = sounds[name]
-	if not s then return end
-	local clone = s:Clone()
-	clone.Volume = (volume or 1) * sfxVolume * masterVolume
-	if pitch then clone.PlaybackSpeed = pitch end
-	clone:Play()
-	game:GetService("Debris"):AddItem(clone, clone.TimeLength + 1)
-	return clone
-end
-function AudioManager:PlayMusic(name, fadeTime)
-	if currentMusic then
-		currentMusic:Stop()
-	end
-	local music = musicTracks[name]
-	if music then
-		music.Volume = 0
-		music:Play()
-		local tween = game:GetService("TweenService"):Create(music, TweenInfo.new(fadeTime or 1), {Volume = musicVolume * masterVolume})
-		tween:Play()
-		currentMusic = music
-	end
-end
-function AudioManager:StopMusic(fadeTime)
-	if currentMusic then
-		local tween = game:GetService("TweenService"):Create(currentMusic, TweenInfo.new(fadeTime or 1), {Volume = 0})
-		tween:Play()
-		task.delay(fadeTime or 1, function() currentMusic:Stop() currentMusic = nil end)
-	end
-end
-function AudioManager:SetMasterVolume(vol) masterVolume = vol end
-function AudioManager:SetMusicVolume(vol) musicVolume = vol end
-function AudioManager:SetSFXVolume(vol) sfxVolume = vol end
-return AudioManager]==], _SPS)
-
-		_addFake("LocalScript", "HUDManager", [==[-- HUDManager
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local RunService = game:GetService("RunService")
-local HUDManager = {}
-local LocalPlayer = Players.LocalPlayer
-local playerGui = LocalPlayer:WaitForChild("PlayerGui")
-local hudElements = {}
-function HUDManager:Init()
-	local mainGui = playerGui:FindFirstChild("MainGui")
-	if mainGui then
-		hudElements.healthBar = mainGui:FindFirstChild("HealthBar")
-		hudElements.manaBar = mainGui:FindFirstChild("ManaBar")
-		hudElements.xpBar = mainGui:FindFirstChild("XPBar")
-		hudElements.coinLabel = mainGui:FindFirstChild("CoinLabel")
-		hudElements.levelLabel = mainGui:FindFirstChild("LevelLabel")
-	end
-	RunService.Heartbeat:Connect(function() self:Update() end)
-end
-function HUDManager:Update()
-	local char = LocalPlayer.Character
-	if not char then return end
-	local humanoid = char:FindFirstChildOfClass("Humanoid")
-	if humanoid and hudElements.healthBar then
-		hudElements.healthBar.Size = UDim2.new(humanoid.Health / humanoid.MaxHealth, 0, 1, 0)
-	end
-end
-function HUDManager:SetCoins(amount)
-	if hudElements.coinLabel then hudElements.coinLabel.Text = tostring(amount) end
-end
-function HUDManager:SetLevel(level)
-	if hudElements.levelLabel then hudElements.levelLabel.Text = "Lv. " .. tostring(level) end
-end
-function HUDManager:FlashElement(name, color)
-	local el = hudElements[name]
-	if el then
-		local orig = el.BackgroundColor3
-		el.BackgroundColor3 = color or Color3.fromRGB(255, 255, 100)
-		task.delay(0.3, function() el.BackgroundColor3 = orig end)
-	end
-end
-HUDManager:Init()
-return HUDManager]==], _SPS)
-
-		_addFake("LocalScript", "MenuSystem", [==[-- MenuSystem
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local MenuSystem = {}
-local LocalPlayer = Players.LocalPlayer
-local playerGui = LocalPlayer:WaitForChild("PlayerGui")
-local menuStack = {}
-local menuOpen = false
-function MenuSystem:OpenMenu(menuName)
-	local mainGui = playerGui:FindFirstChild("MainGui")
-	local menu = mainGui and mainGui:FindFirstChild(menuName)
-	if menu then
-		menu.Visible = true
-		menu.BackgroundTransparency = 1
-		table.insert(menuStack, menu)
-		menuOpen = true
-	end
-end
-function MenuSystem:CloseTop()
-	if #menuStack > 0 then
-		local top = table.remove(menuStack)
-		top.Visible = false
-		menuOpen = #menuStack > 0
-	end
-end
-function MenuSystem:CloseAll()
-	for _, menu in ipairs(menuStack) do menu.Visible = false end
-	menuStack = {}
-	menuOpen = false
-end
-function MenuSystem:IsOpen() return menuOpen end
-UserInputService.InputBegan:Connect(function(input, gpe)
-	if gpe then return end
-	if input.KeyCode == Enum.KeyCode.Escape then
-		if menuOpen then MenuSystem:CloseTop() end
-	end
-end)
-return MenuSystem]==], _SPS)
-
-		_addFake("LocalScript", "NotificationClient", [==[-- NotificationClient
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local NotificationClient = {}
-local LocalPlayer = Players.LocalPlayer
-local playerGui = LocalPlayer:WaitForChild("PlayerGui")
-local notificationQueue = {}
-local MAX_VISIBLE = 5
-function NotificationClient:Init()
-	local remote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("Notification")
-	if remote then
-		remote.OnClientEvent:Connect(function(title, message, duration, notifType)
-			self:Show(title, message, duration, notifType)
-		end)
-	end
-end
-function NotificationClient:Show(title, message, duration, notifType)
-	local template = playerGui:FindFirstChild("NotificationTemplate")
-	if not template then return end
-	local clone = template:Clone()
-	clone.Name = "Notification"
-	clone.Title.Text = title or ""
-	clone.Message.Text = message or ""
-	clone.NotificationType.Text = notifType or "Info"
-	clone.Position = UDim2.new(1.1, 0, 0.8 - (#notificationQueue * 0.08), 0)
-	clone.Visible = true
-	clone.Parent = playerGui
-	table.insert(notificationQueue, clone)
-	TweenService:Create(clone, TweenInfo.new(0.4, Enum.EasingStyle.Quart), {Position = UDim2.new(1, -310, clone.Position.Y.Scale, 0)}):Play()
-	task.delay(duration or 5, function()
-		TweenService:Create(clone, TweenInfo.new(0.3), {Position = UDim2.new(1.1, 0, clone.Position.Y.Scale, 0)}):Play()
-		task.delay(0.3, function()
-			for i, n in ipairs(notificationQueue) do if n == clone then table.remove(notificationQueue, i) break end end
-			clone:Destroy()
-		end)
-	end)
-	while #notificationQueue > MAX_VISIBLE do
-		local old = table.remove(notificationQueue, 1)
-		if old then old:Destroy() end
-	end
-end
-NotificationClient:Init()
-return NotificationClient]==], _SPS)
-
-		----------------------------------------------------------------
-		-- STARTERGUI (ScreenGuis with LocalScripts)
-		----------------------------------------------------------------
-		pcall(function()
-		local _SG = service.StarterGui
-
-		local function _makeScreenGui(name, parent)
-			local gui = Instance.new("ScreenGui")
-			gui.Name = name
-			gui.ResetOnSpawn = false
-			gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-			gui.IgnoreGuiInset = false
-			gui.Parent = parent or _SG
-			return gui
-		end
-
-		local _mainHUD = _makeScreenGui("MainHUD")
-
-		local _healthBar = Instance.new("Frame")
-		_healthBar.Name = "HealthBar"
-		_healthBar.Size = UDim2.new(0.2, 0, 0.02, 0)
-		_healthBar.Position = UDim2.new(0.01, 0, 0.95, 0)
-		_healthBar.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-		_healthBar.BorderSizePixel = 0
-		_healthBar.Parent = _mainHUD
-
-		local _manaBar = Instance.new("Frame")
-		_manaBar.Name = "ManaBar"
-		_manaBar.Size = UDim2.new(0.15, 0, 0.02, 0)
-		_manaBar.Position = UDim2.new(0.01, 0, 0.93, 0)
-		_manaBar.BackgroundColor3 = Color3.fromRGB(50, 100, 255)
-		_manaBar.BorderSizePixel = 0
-		_manaBar.Parent = _mainHUD
-
-		local _xpBar = Instance.new("Frame")
-		_xpBar.Name = "XPBar"
-		_xpBar.Size = UDim2.new(0.25, 0, 0.015, 0)
-		_xpBar.Position = UDim2.new(0.01, 0, 0.915, 0)
-		_xpBar.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
-		_xpBar.BorderSizePixel = 0
-		_xpBar.Parent = _mainHUD
-
-		local _coinLabel = Instance.new("TextLabel")
-		_coinLabel.Name = "CoinLabel"
-		_coinLabel.Size = UDim2.new(0.1, 0, 0.03, 0)
-		_coinLabel.Position = UDim2.new(0.01, 0, 0.88, 0)
-		_coinLabel.BackgroundTransparency = 1
-		_coinLabel.Text = "0"
-		_coinLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
-		_coinLabel.TextScaled = true
-		_coinLabel.Font = Enum.Font.GothamBold
-		_coinLabel.TextXAlignment = Enum.TextXAlignment.Left
-		_coinLabel.Parent = _mainHUD
-
-		local _levelLabel = Instance.new("TextLabel")
-		_levelLabel.Name = "LevelLabel"
-		_levelLabel.Size = UDim2.new(0.08, 0, 0.03, 0)
-		_levelLabel.Position = UDim2.new(0.01, 0, 0.85, 0)
-		_levelLabel.BackgroundTransparency = 1
-		_levelLabel.Text = "Lv. 1"
-		_levelLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-		_levelLabel.TextScaled = true
-		_levelLabel.Font = Enum.Font.GothamBold
-		_levelLabel.TextXAlignment = Enum.TextXAlignment.Left
-		_levelLabel.Parent = _mainHUD
-
-		-- ShopGUI
-		local _shopGui = _makeScreenGui("ShopGUI")
-		local _shopFrame = Instance.new("Frame")
-		_shopFrame.Name = "ShopFrame"
-		_shopFrame.Size = UDim2.new(0.4, 0, 0.6, 0)
-		_shopFrame.Position = UDim2.new(0.3, 0, 0.2, 0)
-		_shopFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-		_shopFrame.BorderSizePixel = 0
-		_shopFrame.Visible = false
-		_shopFrame.Parent = _shopGui
-		local _shopTitle = Instance.new("TextLabel")
-		_shopTitle.Size = UDim2.new(1, 0, 0.1, 0)
-		_shopTitle.BackgroundTransparency = 1
-		_shopTitle.Text = "Shop"
-		_shopTitle.TextColor3 = Color3.fromRGB(255, 215, 0)
-		_shopTitle.TextScaled = true
-		_shopTitle.Font = Enum.Font.GothamBold
-		_shopTitle.Parent = _shopFrame
-
-		-- InventoryGUI
-		local _invGui = _makeScreenGui("InventoryGUI")
-		local _invFrame = Instance.new("Frame")
-		_invFrame.Name = "InventoryFrame"
-		_invFrame.Size = UDim2.new(0.35, 0, 0.55, 0)
-		_invFrame.Position = UDim2.new(0.325, 0, 0.225, 0)
-		_invFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-		_invFrame.BorderSizePixel = 0
-		_invFrame.Visible = false
-		_invFrame.Parent = _invGui
-		local _invTitle = Instance.new("TextLabel")
-		_invTitle.Size = UDim2.new(1, 0, 0.08, 0)
-		_invTitle.BackgroundTransparency = 1
-		_invTitle.Text = "Inventory"
-		_invTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-		_invTitle.TextScaled = true
-		_invTitle.Font = Enum.Font.GothamBold
-		_invTitle.Parent = _invFrame
-		local _invGrid = Instance.new("ScrollingFrame")
-		_invGrid.Name = "ItemGrid"
-		_invGrid.Size = UDim2.new(0.95, 0, 0.85, 0)
-		_invGrid.Position = UDim2.new(0.025, 0, 0.1, 0)
-		_invGrid.BackgroundTransparency = 1
-		_invGrid.BorderSizePixel = 0
-		_invGrid.CanvasSize = UDim2.new(0, 0, 2, 0)
-		_invGrid.ScrollBarThickness = 4
-		_invGrid.Parent = _invFrame
-		local _invGridLayout = Instance.new("UIGridLayout")
-		_invGridLayout.CellSize = UDim2.new(0, 60, 0, 60)
-		_invGridLayout.CellPadding = UDim2.new(0, 5, 0, 5)
-		_invGridLayout.Parent = _invGrid
-
-		-- SettingsGUI
-		local _settingsGui = _makeScreenGui("SettingsGUI")
-		local _settingsFrame = Instance.new("Frame")
-		_settingsFrame.Name = "SettingsFrame"
-		_settingsFrame.Size = UDim2.new(0.3, 0, 0.5, 0)
-		_settingsFrame.Position = UDim2.new(0.35, 0, 0.25, 0)
-		_settingsFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
-		_settingsFrame.BorderSizePixel = 0
-		_settingsFrame.Visible = false
-		_settingsFrame.Parent = _settingsGui
-		local _settingsTitle = Instance.new("TextLabel")
-		_settingsTitle.Size = UDim2.new(1, 0, 0.1, 0)
-		_settingsTitle.BackgroundTransparency = 1
-		_settingsTitle.Text = "Settings"
-		_settingsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-		_settingsTitle.TextScaled = true
-		_settingsTitle.Font = Enum.Font.GothamBold
-		_settingsTitle.Parent = _settingsFrame
-
-		----------------------------------------------------------------
-		-- WORKSPACE (visual-only, no physics objects)
-		----------------------------------------------------------------
-		pcall(function()
-		local _workspace = workspace
-
-		local _atmosphere = Instance.new("Atmosphere")
-		_atmosphere.Name = "GameAtmosphere"
-		_atmosphere.Density = 0.3
-		_atmosphere.Offset = 0.25
-		_atmosphere.Color = Color3.fromRGB(199, 216, 255)
-		_atmosphere.Decay = Color3.fromRGB(92, 108, 138)
-		_atmosphere.Haze = 0.5
-		_atmosphere.Parent = _workspace
-
-		local _bloom = Instance.new("BloomEffect")
-		_bloom.Name = "GameBloom"
-		_bloom.Intensity = 0.5
-		_bloom.Size = 24
-		_bloom.Threshold = 2
-		_bloom.Parent = _workspace
-
-		local _colorCorrection = Instance.new("ColorCorrectionEffect")
-		_colorCorrection.Name = "GameColorCorrection"
-		_colorCorrection.Brightness = 0
-		_colorCorrection.Contrast = 0.1
-		_colorCorrection.Saturation = 0.2
-		_colorCorrection.TintColor = Color3.fromRGB(255, 255, 255)
-		_colorCorrection.Parent = _workspace
-
-		local _sunRays = Instance.new("SunRaysEffect")
-		_sunRays.Name = "GameSunRays"
-		_sunRays.Intensity = 0.1
-		_sunRays.Spread = 0.8
-		_sunRays.Parent = _workspace
-
-		end) -- end workspace pcall
-		end) -- end startergui pcall
-
-		----------------------------------------------------------------
-		-- XELO AI // INJECT GENERATED CODE FILES
-		-- The XELO AI chat publishes its freshly generated files to the
-		-- executor environment (getgenv().XELO_AI_EXPORT_DEFS). Bake them
-		-- into the saved place exactly where they would be planted in-game,
-		-- marked with the XELO_AI_GENERATED attribute so their source is
-		-- always exported intact (survives DecompileIgnoring too).
-		----------------------------------------------------------------
-		local _xeloDefs = GLOBAL_ENV.XELO_AI_EXPORT_DEFS
-		if type(_xeloDefs) == "table" then
-			local _xeloValidServices = {
-				ServerScriptService = true,
-				ReplicatedStorage = true,
-				StarterPlayerScripts = true,
-				ServerStorage = true,
-				StarterGui = true,
-				StarterCharacterScripts = true,
-			}
-			local _xeloSanitize = function(name)
-				name = tostring(name or ""):gsub("[^%w%._%-]", "_"):gsub("^%-+", "")
-				if name == "" then return nil end
-				if #name > 96 then name = name:sub(1, 96) end
-				return name
-			end
-			for _, def in ipairs(_xeloDefs) do
-				pcall(function()
-					local className = tostring(def.class)
-					if className ~= "Script" and className ~= "LocalScript" and className ~= "ModuleScript" then
-						return
-					end
-					local scriptName = _xeloSanitize(def.name)
-					if not scriptName then return end
-					local sourceText = tostring(def.source)
-					if #sourceText == 0 then return end
-					local serviceName = tostring(def.service)
-					if not _xeloValidServices[serviceName] then return end
-					local parent = service[serviceName]
-					if not parent then return end
-					if serviceName == "ReplicatedStorage" then
-						local folder = parent:FindFirstChild("XeloAI")
-						if not folder then
-							folder = Instance.new("Folder")
-							folder.Name = "XeloAI"
-							folder.Archivable = true
-							folder.Parent = parent
-							table.insert(_fakeAll, folder)
-						end
-						parent = folder
-					end
-					local existing = parent:FindFirstChild(scriptName)
-					if existing then
-						-- Already planted in-game. Force the exact source through the
-						-- serializer (__SaveSpecific writes it straight into the XML)
-						-- so the export never depends on being able to READ BACK a
-						-- server script's Source, which client executors cannot do.
-						-- Only do this for real AI scripts (attribute set by the planter)
-						-- or for scripts whose source is unreadable/empty; a genuine game
-						-- script that happens to share the name is left untouched.
-						local marked = false
-						pcall(function() marked = existing:GetAttribute("XELO_AI_GENERATED") == true end)
-						if not marked then
-							local curSrc = ""
-							pcall(function() curSrc = tostring(existing.Source or "") end)
-							local looksEmpty = #curSrc:gsub("%s", "") == 0
-								or curSrc:find("PURCHASE XELO EXECUTOR") ~= nil
-							if not looksEmpty then
-								return
-							end
-						end
-						pcall(function() existing:SetAttribute("XELO_AI_GENERATED", true) end)
-						InstancesOverrides[existing] = {
-							__SaveSpecific = true,
-							Properties = { Name = scriptName, Source = sourceText },
-						}
-						return
-					end
-					local s = Instance.new(className)
-					s.Name = scriptName
-					s.Source = sourceText
-					s:SetAttribute("XELO_AI_GENERATED", true)
-					s.Archivable = true
-					s.Parent = parent
-					InstancesOverrides[s] = {
-						__SaveSpecific = true,
-						Properties = { Name = scriptName, Source = sourceText },
-					}
-					table.insert(_fakeAll, s)
-				end)
-			end
-		end
 
 		----------------------------------------------------------------
 		-- NOW SAVE THE HIERARCHY (all fake instances are parented, so they get embedded)
@@ -4432,7 +3772,6 @@ return NotificationClient]==], _SPS)
 
 		-- IgnoreList.Terrain = false   <-- COMENTAT / ȘTERS
 				-- XELO CREDIT IN SERVERSCRIPT SERVICE
-		save_extra("STEALED_BY_XELO", nil, false, "Script", "--[[\nTHIS GAME WAS STEALED BY XELO\nJOIN THE DISCORD SERVER TO COPY ANY GAMES\nhttps://discord.gg/F9pywQsePr\n\nThis game was saved using XELO STEALER.\n]]", service.ServerScriptService)
 			
 		if IsolateLocalPlayer or IsolateLocalPlayerCharacter then
 			local LocalPlayer = service.Players.LocalPlayer
